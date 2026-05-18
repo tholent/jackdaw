@@ -27,6 +27,7 @@ packages = ["src/jackdaw"]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
+  "pytest-cov>=5",
   "respx>=0.21",
   "mypy>=1.10",
   "ruff>=0.4",
@@ -39,6 +40,16 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src/jackdaw"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
 
 # ---------------------------------------------------------------------------
 # ruff
