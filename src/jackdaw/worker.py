@@ -25,6 +25,11 @@ from jackdaw.services.http01 import Http01ValidationError, key_authorization, va
 log = logging.getLogger(__name__)
 
 
+def _s(value: str) -> str:
+    """Strip newlines from user-supplied strings before logging to prevent log injection."""
+    return value.replace("\n", "\\n").replace("\r", "\\r")
+
+
 async def run_challenge(authz_id: str, order_id: str) -> None:
     """Validate HTTP-01 proof of control, then advance authz/order status.
 
@@ -42,11 +47,13 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
         order = await db.get(Order, order_id)
 
         if authz is None or order is None:
-            log.error("run_challenge: row not found — authz=%s order=%s", authz_id, order_id)
+            log.error(
+                "run_challenge: row not found — authz=%s order=%s", _s(authz_id), _s(order_id)
+            )
             return
 
         if authz.challenge_token is None:
-            log.error("run_challenge: authz %s has no challenge token", authz_id)
+            log.error("run_challenge: authz %s has no challenge token", _s(authz_id))
             authz.status = "invalid"
             order.status = "invalid"
             await db.commit()
@@ -67,7 +74,7 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
         domain = authz.identifier
         expected = key_authorization(token, account.public_key)
 
-    log.info("Starting HTTP-01 validation for %s (authz %s)", domain, authz_id)
+    log.info("Starting HTTP-01 validation for %s (authz %s)", _s(domain), _s(authz_id))
 
     try:
         await validate_http01(domain, token, expected)
@@ -85,17 +92,17 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
         order = await db.get(Order, order_id)
 
         if authz is None or order is None:
-            log.error("run_challenge: rows vanished after validation — authz=%s", authz_id)
+            log.error("run_challenge: rows vanished after validation — authz=%s", _s(authz_id))
             return
 
         if validated:
             authz.status = "valid"
             order.status = "ready"
-            log.info("Order %s marked ready (authz %s validated)", order_id, authz_id)
+            log.info("Order %s marked ready (authz %s validated)", _s(order_id), _s(authz_id))
         else:
             authz.status = "invalid"
             order.status = "invalid"
-            log.warning("Order %s marked invalid (authz %s failed)", order_id, authz_id)
+            log.warning("Order %s marked invalid (authz %s failed)", _s(order_id), _s(authz_id))
 
         await db.commit()
 
@@ -124,17 +131,17 @@ async def process_finalize(
     async with AsyncSessionLocal() as db:
         order = await db.get(Order, order_id)
         if order is None:
-            log.error("process_finalize: order %s not found", order_id)
+            log.error("process_finalize: order %s not found", _s(order_id))
             return
         order.status = "processing"
         await db.commit()
 
-    log.info("Starting LE flow for order %s (domain=%s)", order_id, domain)
+    log.info("Starting LE flow for order %s (domain=%s)", _s(order_id), _s(domain))
 
     try:
         pem_chain = await le.order_cert(acme_client, domain, csr_der)
     except Exception:
-        log.exception("LE cert issuance failed for order %s", order_id)
+        log.exception("LE cert issuance failed for order %s", _s(order_id))
         async with AsyncSessionLocal() as db:
             order = await db.get(Order, order_id)
             if order is not None:
@@ -148,7 +155,7 @@ async def process_finalize(
     async with AsyncSessionLocal() as db:
         order = await db.get(Order, order_id)
         if order is None:
-            log.error("process_finalize: order %s vanished after cert issuance", order_id)
+            log.error("process_finalize: order %s vanished after cert issuance", _s(order_id))
             return
 
         cert_id = await store_cert(db, order_id, pem_chain, expires_at)
@@ -156,4 +163,4 @@ async def process_finalize(
         order.status = "valid"
         await db.commit()
 
-    log.info("Order %s complete — cert %s stored", order_id, cert_id)
+    log.info("Order %s complete — cert %s stored", _s(order_id), _s(cert_id))
