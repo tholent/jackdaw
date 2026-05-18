@@ -5,7 +5,7 @@ from jackdaw.dns.base import DNSProvider
 
 class NullDNSProvider(DNSProvider):
     async def set_txt(self, domain: str, name: str, value: str) -> None:
-        pass
+        pass  # intentional no-op: DNS validation is skipped in this environment
 
     async def delete_txt(self, domain: str, name: str) -> None:
-        pass
+        pass  # intentional no-op: DNS validation is skipped in this environment
