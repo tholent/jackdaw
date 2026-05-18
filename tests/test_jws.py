@@ -26,7 +26,9 @@ async def _create_account(client: AsyncClient, db: AsyncSession) -> tuple:
     body = build_jws(
         payload={"termsOfServiceAgreed": True},
         url="https://jackdaw.test/acme/new-account",
-        nonce=nonce, key=key, jwk=jwk,
+        nonce=nonce,
+        key=key,
+        jwk=jwk,
     )
     resp = await client.post("/acme/new-account", json=body, headers=_CT)
     assert resp.status_code == 201
@@ -224,6 +226,44 @@ async def test_kid_wrong_prefix_rejected(
     )
     resp = await test_client.post("/acme/new-order", json=body, headers=_CT)
     assert resp.status_code == 400
+
+
+async def test_bad_signature_does_not_burn_nonce(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """A tampered-signature request must not consume the nonce (H3).
+
+    After a failed request with a bad signature the same nonce must still be
+    usable by a correctly signed request.
+    """
+    key = make_ec_key()
+    jwk = jwk_for_key(key)
+    nonce = await _get_nonce(db_session)
+    url = "https://jackdaw.test/acme/new-account"
+
+    # First request: valid nonce, bad signature.
+    body = build_jws(payload={"termsOfServiceAgreed": True}, url=url, nonce=nonce, key=key, jwk=jwk)
+    import base64
+
+    sig_str = body["signature"]
+    pad = 4 - len(sig_str) % 4
+    raw = bytearray(base64.urlsafe_b64decode(sig_str + ("=" * pad if pad != 4 else "")))
+    raw[0] ^= 0xFF
+    body["signature"] = base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode()
+
+    bad_resp = await test_client.post(
+        "/acme/new-account", json=body, headers={"Content-Type": "application/jose+json"}
+    )
+    assert bad_resp.status_code == 400
+
+    # Second request: same nonce, correct signature — must succeed.
+    good_body = build_jws(
+        payload={"termsOfServiceAgreed": True}, url=url, nonce=nonce, key=key, jwk=jwk
+    )
+    good_resp = await test_client.post(
+        "/acme/new-account", json=good_body, headers={"Content-Type": "application/jose+json"}
+    )
+    assert good_resp.status_code in (200, 201)
 
 
 async def test_deactivated_account_rejected(

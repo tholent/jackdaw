@@ -25,8 +25,8 @@ log = logging.getLogger(__name__)
 # RFC 8555 §7.4 — only these algorithms are permitted.
 _ALLOWED_ALGS: frozenset[str] = frozenset({"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"})
 
-# Map algorithm name → josepy JWA instance.
-_ALG_MAP = {
+# Map algorithm name → josepy JWA instance (also used by key-change route).
+ALG_MAP = {
     "RS256": RS256,
     "RS384": RS384,
     "RS512": RS512,
@@ -100,9 +100,6 @@ async def verify_jws(
     if alg_name not in _ALLOWED_ALGS:
         raise HTTPException(status_code=400, detail=f"Unsupported JWS algorithm: {alg_name!r}")
 
-    # Nonce must be consumed before anything else to prevent replay.
-    await consume_nonce(nonce_val, db)
-
     # The URL in the protected header must exactly match the request URL.
     if url_val != str(request.url):
         raise HTTPException(status_code=400, detail="JWS url claim does not match request URL")
@@ -134,7 +131,7 @@ async def verify_jws(
                 status_code=400,
                 detail="JWS kid is not a valid account URL for this server",
             )
-        account_id = kid[len(prefix):].rstrip("/")
+        account_id = kid[len(prefix) :].rstrip("/")
         if not account_id:
             raise HTTPException(status_code=400, detail="JWS kid is missing the account ID")
 
@@ -154,7 +151,7 @@ async def verify_jws(
     # Verify: signing_input = ASCII(base64url(protected) || '.' || base64url(payload))
     signing_input = f"{protected_b64}.{payload_b64}".encode("ascii")
     sig_bytes = b64url_decode(signature_b64)
-    alg = _ALG_MAP[alg_name]
+    alg = ALG_MAP[alg_name]
 
     try:
         pub_key = jwk.public_key().key
@@ -165,6 +162,10 @@ async def verify_jws(
 
     if not valid:
         raise HTTPException(status_code=400, detail="JWS signature verification failed")
+
+    # Consume nonce only after the signature is verified so a bad request cannot
+    # burn a valid nonce (preventing the legitimate client from using it).
+    await consume_nonce(nonce_val, db)
 
     # Decode payload (empty string is valid — used for challenge acknowledgement).
     payload_dict: dict[str, Any] = {}
