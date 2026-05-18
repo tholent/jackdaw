@@ -1,5 +1,7 @@
 # Jackdaw
 
+[![CI](https://github.com/tholent/jackdaw/actions/workflows/ci.yml/badge.svg)](https://github.com/tholent/jackdaw/actions/workflows/ci.yml) [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=tholent_jackdaw&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=tholent_jackdaw) [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=tholent_jackdaw&metric=coverage)](https://sonarcloud.io/summary/new_code?id=tholent_jackdaw)
+
 A self-hosted ACME relay that lets internal clients obtain publicly trusted TLS
 certificates from Let's Encrypt without needing direct DNS API access.
 
