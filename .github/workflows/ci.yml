@@ -70,7 +70,7 @@ jobs:
           name: coverage-report
 
       - name: SonarQube Cloud scan
-        uses: SonarSource/sonarcloud-github-action@v3
+        uses: SonarSource/sonarcloud-github-action@v2
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
