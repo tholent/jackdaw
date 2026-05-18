@@ -33,8 +33,9 @@ install-prod: ## Install runtime deps only (no dev tools)
 # Quality gates
 # ---------------------------------------------------------------------------
 .PHONY: lint
-lint: ## Run ruff linter (check only, no fixes)
+lint: ## Run ruff linter and format check (check only, no fixes)
 	uv run ruff check $(SRC) $(TESTS)
+	uv run ruff format --check $(SRC) $(TESTS)
 
 .PHONY: format
 format: ## Auto-format and fix lint issues with ruff
