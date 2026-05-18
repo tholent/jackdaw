@@ -1,0 +1,26 @@
+services:
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    # Uses the image's built-in config at /test/config/pebble-config.json.
+    ports:
+      - "14000:14000"   # ACME directory
+      - "15000:15000"   # management API
+    environment:
+      - PEBBLE_VA_NOSLEEP=1        # skip propagation wait
+      - PEBBLE_VA_ALWAYS_VALID=1   # skip actual DNS validation
+
+  jackdaw-test:
+    build: .
+    environment:
+      - DNS_PROVIDER=null
+      - RELAY_DOMAIN=jackdaw.test
+      - ACME_EMAIL=test@example.com
+      - LE_DIRECTORY=https://pebble:14000/dir
+      - DATABASE_URL=sqlite+aiosqlite:////tmp/test.db
+      - LE_ACCOUNT_KEY_PATH=/tmp/le_account.key
+      - DNS_PROPAGATION_WAIT=0
+      - LE_VERIFY_SSL=false
+    depends_on:
+      - pebble
+    ports:
+      - "8000:8000"

@@ -1,0 +1,50 @@
+services:
+  init-certs:
+    image: alpine/openssl
+    volumes:
+      - jackdaw-data:/data
+      - ./nginx/bootstrap:/bootstrap:ro
+    command: sh /bootstrap/generate-selfsigned.sh
+    # Run to completion before nginx starts.
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - jackdaw-data:/data:ro
+    depends_on:
+      init-certs:
+        condition: service_completed_successfully
+      jackdaw:
+        condition: service_healthy
+
+  jackdaw:
+    build: .
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    environment:
+      - DNS_PROVIDER=${DNS_PROVIDER:-porkbun}
+      - PORKBUN_API_KEY=${PORKBUN_API_KEY}
+      - PORKBUN_SECRET_API_KEY=${PORKBUN_SECRET_API_KEY}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
+      - RELAY_DOMAIN=${RELAY_DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+      - LE_DIRECTORY=${LE_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
+      - DNS_PROPAGATION_WAIT=${DNS_PROPAGATION_WAIT:-30}
+      - ALLOWED_DOMAINS=${ALLOWED_DOMAINS:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=sqlite+aiosqlite:////data/relay.db
+    volumes:
+      - jackdaw-data:/data
+    expose:
+      - "8000"
+
+volumes:
+  jackdaw-data:
