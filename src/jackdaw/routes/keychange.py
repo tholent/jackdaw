@@ -104,7 +104,14 @@ async def _verify_inner_jws(
     return new_jwk_data
 
 
-@router.post("/acme/key-change")
+@router.post(
+    "/acme/key-change",
+    responses={
+        400: {"description": "Malformed JWS or invalid key-change payload"},
+        401: {"description": "Account not found"},
+        409: {"description": "New key already registered to another account"},
+    },
+)
 async def key_change(request: Request, db: _DB) -> JSONResponse:
     """Roll over the account signing key (RFC 8555 §7.3.5).
 

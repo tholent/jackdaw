@@ -57,7 +57,7 @@ def _check_domain_policy(identifiers: list[Identifier]) -> None:
             )
 
 
-@router.post("/acme/new-order")
+@router.post("/acme/new-order", responses={403: {"description": "Domain not permitted by policy"}})
 async def new_order(request: Request, db: _DB) -> JSONResponse:
     """Create a new certificate order (RFC 8555 §7.4).
 
@@ -145,7 +145,13 @@ async def get_order(order_id: str, request: Request, db: _DB) -> JSONResponse:
     return JSONResponse(content=body.model_dump(exclude_none=True))
 
 
-@router.post("/acme/order/{order_id}/finalize")
+@router.post(
+    "/acme/order/{order_id}/finalize",
+    responses={
+        400: {"description": "Order has no identifiers"},
+        403: {"description": "Order is not in ready state"},
+    },
+)
 async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONResponse:
     """Accept the client's CSR and begin certificate issuance (RFC 8555 §7.4).
 

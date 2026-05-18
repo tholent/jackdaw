@@ -22,7 +22,10 @@ _DB = Annotated[AsyncSession, Depends(get_db)]
 _background_tasks: set[asyncio.Task[None]] = set()
 
 
-@router.post("/acme/challenge/{authz_id}")
+@router.post(
+    "/acme/challenge/{authz_id}",
+    responses={400: {"description": "Authorization already in terminal state"}},
+)
 async def acknowledge_challenge(authz_id: str, request: Request, db: _DB) -> JSONResponse:
     """Handle the client's challenge-ready notification (RFC 8555 §7.5.1).
 
