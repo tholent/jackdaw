@@ -21,10 +21,15 @@ class Settings(BaseSettings):
     ssl_dir: str = "/data/ssl"
     nonce_ttl: int = 600  # seconds; 10 minutes
     log_level: str = "INFO"
-    # Comma-separated base domains; empty string means all subdomains accepted.
+    # Comma-separated base domains; empty string means no extra restriction (proof is the gate).
     allowed_domains: str = ""
     # Set to False when pointing at Pebble (self-signed TLS) or other test CAs.
     le_verify_ssl: bool = True
+    # HTTP-01 challenge validation settings.
+    challenge_http_port: int = 80
+    challenge_timeout: int = 5   # seconds per attempt
+    challenge_retries: int = 3
+    challenge_retry_delay: int = 2  # seconds between retries
 
     model_config = {"env_file": ".env", "case_sensitive": False, "extra": "ignore"}
 

@@ -2,10 +2,10 @@
 
 Two entry points:
 
-``run_challenge`` — Called when a client POSTs to /challenge/{id}.  Advances
-the relay's internal authorization and order status to ``ready`` so the client
-can proceed to finalization.  The actual DNS-01 interaction with LE happens
-inside ``process_finalize`` when the CSR is available.
+``run_challenge`` — Called when a client POSTs to /challenge/{id}.  Performs
+real HTTP-01 validation: fetches the challenge token from the client's domain
+and verifies the key authorization.  Only on success are the authorization and
+order advanced to ``valid``/``ready``.  On failure both are set to ``invalid``.
 
 ``process_finalize`` — Called when a client POSTs to /order/{id}/finalize.
 Runs the complete gufo-acme flow (DNS-01 TXT → propagation wait → LE
@@ -17,22 +17,24 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from jackdaw.db.engine import AsyncSessionLocal
-from jackdaw.db.models import Authorization, Order
+from jackdaw.db.models import Account, Authorization, Order
 from jackdaw.services import le_client as le
 from jackdaw.services.cert_store import store_cert
+from jackdaw.services.http01 import Http01ValidationError, key_authorization, validate_http01
 
 log = logging.getLogger(__name__)
 
 
 async def run_challenge(authz_id: str, order_id: str) -> None:
-    """Advance authz and order to ``ready`` after client challenge acknowledgement.
+    """Validate HTTP-01 proof of control, then advance authz/order status.
 
-    This is optimistic: we mark the relay state immediately so the client can
-    poll ``GET /order/{id}`` and see ``status=ready``.  LE validation is
-    deferred to ``process_finalize`` where the real CSR is available.
+    Fetches ``http://<domain>/.well-known/acme-challenge/<token>`` and checks
+    the response matches the expected key authorization (token + account-key
+    thumbprint).  On success the authorization becomes ``valid`` and the order
+    becomes ``ready``.  On failure both become ``invalid``.
 
     Args:
-        authz_id: UUID of the ``authorizations`` row to update.
+        authz_id: UUID of the ``authorizations`` row to validate.
         order_id: UUID of the parent ``orders`` row to update.
     """
     async with AsyncSessionLocal() as db:
@@ -43,11 +45,59 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
             log.error("run_challenge: row not found — authz=%s order=%s", authz_id, order_id)
             return
 
-        authz.status = "valid"
-        order.status = "ready"
-        await db.commit()
+        if authz.challenge_token is None:
+            log.error("run_challenge: authz %s has no challenge token", authz_id)
+            authz.status = "invalid"
+            order.status = "invalid"
+            await db.commit()
+            return
 
-    log.info("Order %s marked ready (authz %s)", order_id, authz_id)
+        # Load the account key to compute the expected key authorization.
+        account = await db.get(Account, order.account_id)
+        if account is None:
+            log.error(
+                "run_challenge: account %s not found for order %s", order.account_id, order_id
+            )
+            authz.status = "invalid"
+            order.status = "invalid"
+            await db.commit()
+            return
+
+        token = authz.challenge_token
+        domain = authz.identifier
+        expected = key_authorization(token, account.public_key)
+
+    log.info("Starting HTTP-01 validation for %s (authz %s)", domain, authz_id)
+
+    try:
+        await validate_http01(domain, token, expected)
+        validated = True
+        log.info("HTTP-01 validation succeeded for %s", domain)
+    except Http01ValidationError as exc:
+        validated = False
+        log.warning("HTTP-01 validation failed for %s: %s", domain, exc.detail)
+    except Exception:
+        validated = False
+        log.exception("Unexpected error during HTTP-01 validation for %s", domain)
+
+    async with AsyncSessionLocal() as db:
+        authz = await db.get(Authorization, authz_id)
+        order = await db.get(Order, order_id)
+
+        if authz is None or order is None:
+            log.error("run_challenge: rows vanished after validation — authz=%s", authz_id)
+            return
+
+        if validated:
+            authz.status = "valid"
+            order.status = "ready"
+            log.info("Order %s marked ready (authz %s validated)", order_id, authz_id)
+        else:
+            authz.status = "invalid"
+            order.status = "invalid"
+            log.warning("Order %s marked invalid (authz %s failed)", order_id, authz_id)
+
+        await db.commit()
 
 
 async def process_finalize(
