@@ -39,13 +39,6 @@ ALLOWED_DOMAINS=(
     "esbenp.gallerycdn.vsassets.io"
     "esbenp.gallery.vsassets.io"
 
-    # --- Ansible Galaxy + collection sources ---
-    "galaxy.ansible.com"
-    "ansible-galaxy.s3.amazonaws.com"
-
-    # --- AWS IP ranges (used to allowlist S3 us-east-1 for Galaxy backend) ---
-    "ip-ranges.amazonaws.com"
-
     # --- Python packaging (pip, pipx, ansible deps) ---
     "pypi.org"
     "files.pythonhosted.org"
