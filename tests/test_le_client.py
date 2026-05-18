@@ -7,11 +7,16 @@ import hashlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
 from cryptography.hazmat.primitives.serialization import Encoding
-from cryptography.x509 import CertificateSigningRequestBuilder, DNSName, Name, NameAttribute, SubjectAlternativeName
+from cryptography.x509 import (
+    CertificateSigningRequestBuilder,
+    DNSName,
+    Name,
+    NameAttribute,
+    SubjectAlternativeName,
+)
 from cryptography.x509.oid import NameOID
 
 from jackdaw.services.le_client import (
@@ -21,7 +26,6 @@ from jackdaw.services.le_client import (
     _dns01_txt_value,
     _load_or_create_account_key,
 )
-
 
 # ---------------------------------------------------------------------------
 # _apex_domain
@@ -73,9 +77,7 @@ def _make_csr_der() -> bytes:
     csr = (
         CertificateSigningRequestBuilder()
         .subject_name(Name([NameAttribute(NameOID.COMMON_NAME, "test.example.com")]))
-        .add_extension(
-            SubjectAlternativeName([DNSName("test.example.com")]), critical=False
-        )
+        .add_extension(SubjectAlternativeName([DNSName("test.example.com")]), critical=False)
         .sign(key, hashes.SHA256())
     )
     return csr.public_bytes(Encoding.DER)

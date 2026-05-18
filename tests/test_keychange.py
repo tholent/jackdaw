@@ -160,9 +160,7 @@ def _outer_jws(inner: dict, *, key, account_url: str, nonce: str) -> dict:
     return build_jws(payload=inner, url=url, nonce=nonce, key=key, kid=account_url)
 
 
-async def test_inner_jws_missing_fields(
-    test_client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_inner_jws_missing_fields(test_client: AsyncClient, db_session: AsyncSession) -> None:
     """Inner JWS with neither protected nor signature must be rejected."""
     old_key, account_url = await _create_account(test_client, db_session)
     nonce = await generate_nonce(db_session)
@@ -197,9 +195,7 @@ async def test_inner_jws_unsupported_algorithm(
     assert resp.status_code == 400
 
 
-async def test_inner_jws_url_mismatch(
-    test_client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_inner_jws_url_mismatch(test_client: AsyncClient, db_session: AsyncSession) -> None:
     """Inner JWS url not matching key-change URL must be rejected."""
     old_key, account_url = await _create_account(test_client, db_session)
     old_jwk = jwk_for_key(old_key)
@@ -210,18 +206,14 @@ async def test_inner_jws_url_mismatch(
     protected_b64 = _b64url(
         json.dumps({"alg": "ES256", "jwk": new_jwk, "url": "https://wrong.example.com"}).encode()
     )
-    payload_b64 = _b64url(
-        json.dumps({"account": account_url, "oldKey": old_jwk}).encode()
-    )
+    payload_b64 = _b64url(json.dumps({"account": account_url, "oldKey": old_jwk}).encode())
     inner = {"protected": protected_b64, "payload": payload_b64, "signature": "aaa"}
     outer = _outer_jws(inner, key=old_key, account_url=account_url, nonce=nonce)
     resp = await test_client.post("/acme/key-change", json=outer, headers=_CT)
     assert resp.status_code == 400
 
 
-async def test_inner_jws_missing_jwk(
-    test_client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_inner_jws_missing_jwk(test_client: AsyncClient, db_session: AsyncSession) -> None:
     """Inner JWS protected header without 'jwk' must be rejected."""
     old_key, account_url = await _create_account(test_client, db_session)
     nonce = await generate_nonce(db_session)
@@ -233,9 +225,7 @@ async def test_inner_jws_missing_jwk(
     assert resp.status_code == 400
 
 
-async def test_inner_jws_kid_present(
-    test_client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_inner_jws_kid_present(test_client: AsyncClient, db_session: AsyncSession) -> None:
     """Inner JWS that contains both 'jwk' and 'kid' must be rejected."""
     old_key, account_url = await _create_account(test_client, db_session)
     new_jwk = jwk_for_key(make_ec_key())
@@ -250,9 +240,7 @@ async def test_inner_jws_kid_present(
     assert resp.status_code == 400
 
 
-async def test_inner_jws_bad_signature(
-    test_client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_inner_jws_bad_signature(test_client: AsyncClient, db_session: AsyncSession) -> None:
     """Inner JWS with an invalid signature must be rejected."""
     old_key, account_url = await _create_account(test_client, db_session)
     old_jwk = jwk_for_key(old_key)
@@ -290,7 +278,9 @@ async def test_inner_jws_account_url_mismatch(
 
     protected_b64 = _b64url(json.dumps({"alg": "ES256", "jwk": new_jwk, "url": url}).encode())
     payload_b64 = _b64url(
-        json.dumps({"account": "https://jackdaw.test/acme/account/wrong", "oldKey": old_jwk}).encode()
+        json.dumps(
+            {"account": "https://jackdaw.test/acme/account/wrong", "oldKey": old_jwk}
+        ).encode()
     )
     signing_input = f"{protected_b64}.{payload_b64}".encode("ascii")
     der_sig = new_key.sign(signing_input, ECDSA(_hashes.SHA256()))

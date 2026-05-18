@@ -403,9 +403,7 @@ async def test_run_challenge_missing_rows_exits_early() -> None:
     from jackdaw import worker
 
     # Passing non-existent IDs — function should return None without raising.
-    result = await worker.run_challenge(
-        authz_id="nonexistent-authz", order_id="nonexistent-order"
-    )
+    result = await worker.run_challenge(authz_id="nonexistent-authz", order_id="nonexistent-order")
     assert result is None
 
 

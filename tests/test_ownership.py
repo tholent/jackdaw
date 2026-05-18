@@ -337,7 +337,7 @@ async def test_cert_download_returns_pem_chain(
 
     # Insert an order and cert directly into the DB.
     account_id = account_url.rsplit("/", 1)[-1]
-    order_id = await _insert_account_and_order(db_session)
+    await _insert_account_and_order(db_session)
     # The order created by _insert_account_and_order belongs to a *different* account_id.
     # We need the cert to belong to the account we just created via HTTP.
     # Re-insert an order for the real account_id.

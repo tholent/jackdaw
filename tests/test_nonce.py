@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 import pytest
 from fastapi import HTTPException
+from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-
-if TYPE_CHECKING:
-    from httpx import AsyncClient
 
 from jackdaw.db.models import Nonce
 from jackdaw.services.nonce import consume_nonce, generate_nonce, prune_nonces
@@ -86,7 +83,7 @@ async def test_prune_removes_old_nonces(db_session: AsyncSession) -> None:
 
 
 async def test_head_new_nonce_returns_200(
-    test_client: "AsyncClient", db_session: AsyncSession
+    test_client: AsyncClient, db_session: AsyncSession
 ) -> None:
     """HEAD /acme/new-nonce must return 200 with a Replay-Nonce header."""
     resp = await test_client.head("/acme/new-nonce")
@@ -95,7 +92,7 @@ async def test_head_new_nonce_returns_200(
 
 
 async def test_post_new_nonce_returns_204(
-    test_client: "AsyncClient", db_session: AsyncSession
+    test_client: AsyncClient, db_session: AsyncSession
 ) -> None:
     """POST /acme/new-nonce must return 204 with a Replay-Nonce header."""
     resp = await test_client.post("/acme/new-nonce")
