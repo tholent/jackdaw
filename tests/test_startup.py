@@ -118,6 +118,110 @@ def test_le_verify_ssl_false_with_production_raises() -> None:
                 )
 
 
+# ---------------------------------------------------------------------------
+# main.py utility functions: _relay_cert_exists, _relay_cert_days_remaining,
+# and _write_relay_cert
+# ---------------------------------------------------------------------------
+
+
+def test_relay_cert_exists_returns_false_when_missing(tmp_path, monkeypatch) -> None:
+    """_relay_cert_exists must return False when the ssl_dir is empty."""
+    from unittest.mock import patch
+
+    from jackdaw.main import _relay_cert_exists
+
+    with patch("jackdaw.main.get_settings") as mock_settings:
+        mock_settings.return_value.ssl_dir = str(tmp_path)
+        assert _relay_cert_exists() is False
+
+
+def test_relay_cert_exists_returns_true_when_both_present(tmp_path) -> None:
+    from unittest.mock import patch
+
+    from jackdaw.main import _CERT_FILENAME, _KEY_FILENAME, _relay_cert_exists
+
+    (tmp_path / _CERT_FILENAME).write_text("cert")
+    (tmp_path / _KEY_FILENAME).write_text("key")
+
+    with patch("jackdaw.main.get_settings") as mock_settings:
+        mock_settings.return_value.ssl_dir = str(tmp_path)
+        assert _relay_cert_exists() is True
+
+
+def test_relay_cert_days_remaining_returns_none_when_missing(tmp_path) -> None:
+    from unittest.mock import patch
+
+    from jackdaw.main import _relay_cert_days_remaining
+
+    with patch("jackdaw.main.get_settings") as mock_settings:
+        mock_settings.return_value.ssl_dir = str(tmp_path)
+        assert _relay_cert_days_remaining() is None
+
+
+def test_relay_cert_days_remaining_returns_float_for_valid_cert(tmp_path) -> None:
+    """_relay_cert_days_remaining should return a positive float for a non-expired cert."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from cryptography.x509.oid import NameOID
+
+    from jackdaw.main import _CERT_FILENAME, _relay_cert_days_remaining
+
+    key = generate_private_key(SECP256R1())
+    now = datetime.now(UTC)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "relay.test")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=90))
+        .sign(key, hashes.SHA256())
+    )
+    (tmp_path / _CERT_FILENAME).write_bytes(cert.public_bytes(Encoding.PEM))
+
+    with patch("jackdaw.main.get_settings") as mock_settings:
+        mock_settings.return_value.ssl_dir = str(tmp_path)
+        days = _relay_cert_days_remaining()
+
+    assert days is not None
+    assert 88 < days < 91
+
+
+def test_relay_cert_days_remaining_returns_none_on_corrupt_cert(tmp_path) -> None:
+    """_relay_cert_days_remaining must return None when the cert file is not valid PEM."""
+    from unittest.mock import patch
+
+    from jackdaw.main import _CERT_FILENAME, _relay_cert_days_remaining
+
+    (tmp_path / _CERT_FILENAME).write_text("this is not a certificate")
+
+    with patch("jackdaw.main.get_settings") as mock_settings:
+        mock_settings.return_value.ssl_dir = str(tmp_path)
+        result = _relay_cert_days_remaining()
+
+    assert result is None
+
+
+def test_write_relay_cert_writes_files(tmp_path) -> None:
+    from jackdaw.main import _CERT_FILENAME, _KEY_FILENAME, _write_relay_cert
+
+    cert_path = tmp_path / "ssl" / _CERT_FILENAME
+    key_path = tmp_path / "ssl" / _KEY_FILENAME
+
+    _write_relay_cert(cert_path, key_path, "pem-chain-content", "key-content")
+
+    assert cert_path.read_text() == "pem-chain-content"
+    assert key_path.read_text() == "key-content"
+    assert oct(key_path.stat().st_mode)[-3:] == "600"
+
+
 def test_le_verify_ssl_false_with_staging_ok() -> None:
     """LE_VERIFY_SSL=false with staging directory must not raise."""
     from jackdaw.config import Settings
