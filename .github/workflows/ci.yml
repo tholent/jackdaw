@@ -43,11 +43,36 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: pytest
-        run: uv run pytest -v
+      - name: pytest with coverage
+        run: uv run pytest -v --cov --cov-report=xml --cov-report=term-missing
         env:
           PORKBUN_API_KEY: pk1_test
           PORKBUN_SECRET_API_KEY: sk1_test
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  sonar:
+    name: SonarQube scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+
+      - name: SonarQube Cloud scan
+        uses: SonarSource/sonarcloud-github-action@v3
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   build:
     name: Docker build

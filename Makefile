@@ -60,8 +60,8 @@ test-fast: ## Run tests without -v, stop on first failure
 	uv run pytest $(TESTS) -x -q
 
 .PHONY: test-cov
-test-cov: ## Run tests with coverage report
-	uv run pytest $(TESTS) --cov=$(SRC) --cov-report=term-missing
+test-cov: ## Run tests with coverage report (terminal + coverage.xml)
+	uv run pytest $(TESTS) --cov --cov-report=term-missing --cov-report=xml
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (requires Pebble — see docker-compose.test.yml)

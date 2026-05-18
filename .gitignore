@@ -23,6 +23,10 @@ data/
 .ruff_cache/
 .pytest_cache/
 
+# Coverage
+.coverage
+coverage.xml
+
 # macOS
 .DS_Store
 
