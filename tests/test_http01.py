@@ -391,3 +391,228 @@ async def test_challenge_route_returns_processing(
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "processing"
+
+
+# ---------------------------------------------------------------------------
+# worker.run_challenge — error paths (authz/order not found, no token, no account)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_challenge_missing_rows_exits_early() -> None:
+    """run_challenge must exit without crashing when the authz/order rows don't exist."""
+    from jackdaw import worker
+
+    # Passing non-existent IDs — function should return None without raising.
+    result = await worker.run_challenge(
+        authz_id="nonexistent-authz", order_id="nonexistent-order"
+    )
+    assert result is None
+
+
+async def test_run_challenge_no_challenge_token_sets_invalid() -> None:
+    """run_challenge must mark authz+order invalid when challenge_token is None."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from jackdaw import worker
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    acct_id = f"notoken-acct-{uuid.uuid4()}"
+    ord_id = f"notoken-ord-{uuid.uuid4()}"
+    authz_id = f"notoken-authz-{uuid.uuid4()}"
+
+    async with AsyncSessionLocal() as db:
+        db.add(Account(id=acct_id, public_key="{}", status="valid", created_at=datetime.now(UTC)))
+        db.add(
+            Order(
+                id=ord_id,
+                account_id=acct_id,
+                status="pending",
+                identifiers="[]",
+                created_at=datetime.now(UTC),
+            )
+        )
+        db.add(
+            Authorization(
+                id=authz_id,
+                order_id=ord_id,
+                identifier="x.test",
+                status="pending",
+                challenge_token=None,  # intentionally missing
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    await worker.run_challenge(authz_id=authz_id, order_id=ord_id)
+
+    from sqlalchemy import delete
+
+    async with AsyncSessionLocal() as db:
+        authz = await db.get(Authorization, authz_id)
+        order = await db.get(Order, ord_id)
+        assert authz is not None and authz.status == "invalid"
+        assert order is not None and order.status == "invalid"
+        await db.execute(delete(Authorization).where(Authorization.id == authz_id))
+        await db.execute(delete(Order).where(Order.id == ord_id))
+        await db.execute(delete(Account).where(Account.id == acct_id))
+        await db.commit()
+
+
+async def test_run_challenge_account_not_found_sets_invalid() -> None:
+    """run_challenge must mark authz+order invalid when the account row is missing."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from jackdaw import worker
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    ord_id = f"noacct-ord-{uuid.uuid4()}"
+    authz_id = f"noacct-authz-{uuid.uuid4()}"
+
+    # Insert order with a non-existent account_id (no Account row).
+    async with AsyncSessionLocal() as db:
+        db.add(
+            Order(
+                id=ord_id,
+                account_id="nonexistent-account",
+                status="pending",
+                identifiers="[]",
+                created_at=datetime.now(UTC),
+            )
+        )
+        db.add(
+            Authorization(
+                id=authz_id,
+                order_id=ord_id,
+                identifier="x.test",
+                status="pending",
+                challenge_token="tok",
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    await worker.run_challenge(authz_id=authz_id, order_id=ord_id)
+
+    from sqlalchemy import delete
+
+    async with AsyncSessionLocal() as db:
+        authz = await db.get(Authorization, authz_id)
+        order = await db.get(Order, ord_id)
+        assert authz is not None and authz.status == "invalid"
+        assert order is not None and order.status == "invalid"
+        await db.execute(delete(Authorization).where(Authorization.id == authz_id))
+        await db.execute(delete(Order).where(Order.id == ord_id))
+        await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# worker.process_finalize — error paths
+# ---------------------------------------------------------------------------
+
+
+async def test_process_finalize_order_not_found_exits_early() -> None:
+    """process_finalize must exit silently when the order row doesn't exist."""
+    from unittest.mock import MagicMock
+
+    from jackdaw import worker
+
+    result = await worker.process_finalize(
+        order_id="nonexistent-order",
+        domain="x.test",
+        csr_der=b"fake",
+        acme_client=MagicMock(),
+    )
+    assert result is None
+
+
+async def test_process_finalize_le_failure_sets_invalid() -> None:
+    """process_finalize must mark the order invalid when LE cert issuance fails."""
+    import uuid
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from jackdaw import worker
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    acct_id = f"pf-acct-{uuid.uuid4()}"
+    ord_id = f"pf-ord-{uuid.uuid4()}"
+
+    async with AsyncSessionLocal() as db:
+        db.add(Account(id=acct_id, public_key="{}", status="valid", created_at=datetime.now(UTC)))
+        db.add(
+            Order(
+                id=ord_id,
+                account_id=acct_id,
+                status="ready",
+                identifiers='[{"type":"dns","value":"x.test"}]',
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    with patch(
+        "jackdaw.worker.le.order_cert",
+        new=AsyncMock(side_effect=RuntimeError("LE down")),
+    ):
+        await worker.process_finalize(
+            order_id=ord_id,
+            domain="x.test",
+            csr_der=b"fake",
+            acme_client=MagicMock(),
+        )
+
+    from sqlalchemy import delete
+
+    async with AsyncSessionLocal() as db:
+        order = await db.get(Order, ord_id)
+        assert order is not None and order.status == "invalid"
+        await db.execute(delete(Order).where(Order.id == ord_id))
+        await db.execute(delete(Account).where(Account.id == acct_id))
+        await db.commit()
+
+
+async def test_process_finalize_success_stores_cert() -> None:
+    """process_finalize must store the cert and mark order valid on success."""
+    import uuid
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from jackdaw import worker
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    acct_id = f"pf-ok-acct-{uuid.uuid4()}"
+    ord_id = f"pf-ok-ord-{uuid.uuid4()}"
+    fake_pem = "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n"
+
+    async with AsyncSessionLocal() as db:
+        db.add(Account(id=acct_id, public_key="{}", status="valid", created_at=datetime.now(UTC)))
+        db.add(
+            Order(
+                id=ord_id,
+                account_id=acct_id,
+                status="ready",
+                identifiers='[{"type":"dns","value":"x.test"}]',
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    with patch("jackdaw.worker.le.order_cert", new=AsyncMock(return_value=fake_pem)):
+        await worker.process_finalize(
+            order_id=ord_id,
+            domain="x.test",
+            csr_der=b"fake",
+            acme_client=MagicMock(),
+        )
+
+    from sqlalchemy import delete
+
+    async with AsyncSessionLocal() as db:
+        order = await db.get(Order, ord_id)
+        assert order is not None and order.status == "valid"
+        assert order.cert_id is not None
+        await db.execute(delete(Order).where(Order.id == ord_id))
+        await db.execute(delete(Account).where(Account.id == acct_id))
+        await db.commit()
