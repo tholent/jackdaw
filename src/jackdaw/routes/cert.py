@@ -7,8 +7,8 @@ from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw.db.engine import get_db
-from jackdaw.services.cert_store import get_cert
 from jackdaw.services.jws import verify_jws
+from jackdaw.services.ownership import require_cert_owner
 
 router = APIRouter()
 
@@ -22,9 +22,9 @@ async def download_cert(cert_id: str, request: Request, db: _DB) -> Response:
     RFC 8555 §6.3 requires POST-as-GET (POST with empty JWS payload) for
     resource fetches.
     """
-    await verify_jws(request, db)
-    pem_chain = await get_cert(db, cert_id)
+    _, account_id = await verify_jws(request, db)
+    cert = await require_cert_owner(db, cert_id, account_id)
     return Response(
-        content=pem_chain,
+        content=cert.pem_chain,
         media_type="application/pem-certificate-chain",
     )

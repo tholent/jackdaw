@@ -2,15 +2,15 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw.config import get_settings
 from jackdaw.db.engine import get_db
-from jackdaw.db.models import Authorization
 from jackdaw.schemas.acme import AuthzResponse, ChallengeObject, Identifier
 from jackdaw.services.jws import verify_jws
+from jackdaw.services.ownership import require_authz_owner
 
 router = APIRouter()
 
@@ -24,10 +24,8 @@ async def get_authz(authz_id: str, request: Request, db: _DB) -> JSONResponse:
     RFC 8555 §6.3 requires POST-as-GET (POST with empty JWS payload) for
     resource fetches.
     """
-    await verify_jws(request, db)
-    authz = await db.get(Authorization, authz_id)
-    if authz is None:
-        raise HTTPException(status_code=404, detail="Authorization not found")
+    _, account_id = await verify_jws(request, db)
+    authz = await require_authz_owner(db, authz_id, account_id)
 
     settings = get_settings()
     base = settings.relay_base_url

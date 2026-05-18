@@ -23,10 +23,14 @@ from jackdaw.schemas.acme import (
     OrderResponse,
 )
 from jackdaw.services.jws import verify_jws
+from jackdaw.services.ownership import require_order_owner
 
 router = APIRouter()
 
 _DB = Annotated[AsyncSession, Depends(get_db)]
+
+# Strong references to finalization tasks so they cannot be GC'd mid-flight.
+_background_tasks: set[asyncio.Task[None]] = set()
 
 
 def _check_domain_policy(identifiers: list[Identifier]) -> None:
@@ -118,10 +122,8 @@ async def new_order(request: Request, db: _DB) -> JSONResponse:
 @router.post("/acme/order/{order_id}")
 async def get_order(order_id: str, request: Request, db: _DB) -> JSONResponse:
     """Return current status of an order (RFC 8555 §7.4, POST-as-GET)."""
-    await verify_jws(request, db)
-    order = await db.get(Order, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail="Order not found")
+    _, account_id = await verify_jws(request, db)
+    order = await require_order_owner(db, order_id, account_id)
 
     settings = get_settings()
     base = settings.relay_base_url
@@ -150,12 +152,10 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
     The order must be in ``ready`` state.  The CSR is extracted from the JWS
     payload and handed to the background worker.
     """
-    payload, _ = await verify_jws(request, db)
+    payload, account_id = await verify_jws(request, db)
     finalize_req = FinalizeRequest.model_validate(payload)
 
-    order = await db.get(Order, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail="Order not found")
+    order = await require_order_owner(db, order_id, account_id)
     if order.status != "ready":
         raise HTTPException(
             status_code=403,
@@ -177,7 +177,7 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
     # at module load time.
     from jackdaw import worker
 
-    asyncio.create_task(
+    task = asyncio.create_task(
         worker.process_finalize(
             order_id=order_id,
             domain=domain,
@@ -185,6 +185,8 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
             acme_client=request.app.state.le_client,
         )
     )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     settings = get_settings()
     base = settings.relay_base_url
