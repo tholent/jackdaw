@@ -57,7 +57,7 @@ ALLOWED_DOMAINS=(
     "codeload.github.com"
 
     # --- SonarQube and documentation
-    "sonarqube.com"
+    "sonarqube.io"
     "docs.sonarsource.com"
 )
 
@@ -205,6 +205,18 @@ cmd_init() {
     log "host network: $host_network"
     iptables -A INPUT  -s "$host_network" -j ACCEPT
     iptables -A OUTPUT -d "$host_network" -j ACCEPT
+
+    # On Docker Desktop (Mac/Windows) host.docker.internal resolves to a
+    # separate host gateway IP (e.g. 192.168.65.254) that is outside the
+    # default-route subnet above.  Allow it explicitly so MCP servers and
+    # other host-side services are reachable.
+    local hdi_ip
+    hdi_ip=$(grep -m1 'host\.docker\.internal' /etc/hosts | grep -v ':' | awk '{print $1}' || true)
+    if [ -n "$hdi_ip" ] && [ "$hdi_ip" != "$host_ip" ]; then
+        log "host.docker.internal (Docker Desktop): $hdi_ip"
+        iptables -A INPUT  -s "$hdi_ip" -j ACCEPT
+        iptables -A OUTPUT -d "$hdi_ip" -j ACCEPT
+    fi
 
     # Default-deny
     iptables -P INPUT   DROP
