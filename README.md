@@ -30,28 +30,45 @@ that needs LE connectivity.
 
 ## How it works
 
+Jackdaw is a **two-leg ACME bridge**:
+
 ```
 Internal client (certbot / acme.sh / Caddy / any ACME client)
-    │  Standard ACMEv2 (RFC 8555) over HTTPS
+    │  Leg 1 — Standard ACMEv2 HTTP-01 (RFC 8555) over HTTPS
+    │  Client serves /.well-known/acme-challenge/<token> on :80
     ▼
 ┌─────────────────────────────────────────────────────────┐
 │                        Jackdaw                          │
 │                                                         │
 │  FastAPI ACME server          gufo-acme LE client       │
 │  /directory                   new-order → LE            │
-│  /nonce                  ───▶ DNS-01 fulfillment        │
-│  /newAccount                  finalize → LE             │
-│  /newOrder                    fetch cert ← LE           │
+│  /nonce          Leg 1 ──▶    DNS-01 fulfillment        │
+│  /newAccount     HTTP-01      finalize → LE             │
+│  /newOrder       validation   fetch cert ← LE           │
 │  /authz/{id}                       │                    │
 │  /challenge/{id}          DNS provider (pluggable)      │
 │  /order/{id}              set_txt / delete_txt          │
 │  /cert/{id}                        │                    │
 │  SQLite (orders / accounts / certs / nonces)            │
 └─────────────────────────────────────────────────────────┘
-    │  ACMEv2 + DNS-01
+    │  Leg 2 — ACMEv2 + DNS-01
     ▼
 Let's Encrypt  ──▶  Porkbun / Cloudflare / ...
 ```
+
+**Leg 1 (client ↔ Jackdaw):** standard ACME HTTP-01. The client serves a
+challenge token at `http://<domain>/.well-known/acme-challenge/<token>`.
+Jackdaw fetches it over the internal network and verifies the key authorization
+before advancing the order. Any ACME client (certbot, acme.sh, Caddy) works
+unmodified — just point it at Jackdaw's directory URL.
+
+**Leg 2 (Jackdaw ↔ Let's Encrypt):** DNS-01, using the relay's centralised
+DNS provider credentials. The client never needs DNS API access.
+
+> **Important:** client domains must be reachable from the relay over HTTP on
+> port 80 (configurable via `CHALLENGE_HTTP_PORT`) at the time a certificate
+> is requested. The relay validates from its own vantage point using the
+> internal DNS resolver.
 
 The relay maintains a **single shared Let's Encrypt account** and handles all
 DNS-01 challenge fulfillment. Clients generate their own keypairs and CSRs —
@@ -106,26 +123,32 @@ The relay is ready once `GET https://jackdaw.example.com/directory` returns
 
 ## Pointing a client at the relay
 
-Any RFC 8555-compliant ACME client works. Pass the relay's directory URL as the
-ACME server endpoint.
+Any RFC 8555-compliant ACME client works. Point it at Jackdaw's directory URL
+and configure it to use **HTTP-01** challenge validation. Jackdaw validates
+HTTP-01 from its own vantage point (over the internal network) before
+forwarding to Let's Encrypt via DNS-01 — clients never need DNS API access.
+
+> **Prerequisite:** the client's domain must be resolvable from the relay over
+> HTTP on port 80 at issuance time. This is standard for internal services on
+> the same network as the relay.
 
 **certbot**
 ```bash
 certbot certonly \
   --server https://jackdaw.example.com/directory \
-  --manual --preferred-challenges dns \
+  --standalone \
   -d myservice.example.com \
   --email admin@example.com \
-  --agree-tos --non-interactive \
-  --manual-auth-hook /bin/true
+  --agree-tos --non-interactive
 ```
+_(`--standalone` starts a temporary HTTP server on :80 to serve the challenge.)_
 
 **acme.sh**
 ```bash
 acme.sh --issue \
   --server https://jackdaw.example.com/directory \
   -d myservice.example.com \
-  --dns
+  --standalone
 ```
 
 **Caddy** (`Caddyfile`)
@@ -135,6 +158,7 @@ myservice.example.com {
     reverse_proxy localhost:8080
 }
 ```
+_(Caddy handles HTTP-01 automatically when it is already serving the domain.)_
 
 ## Configuration
 
@@ -151,14 +175,18 @@ complete reference.
 | `CLOUDFLARE_API_TOKEN` | Cloudflare | — | Cloudflare API token |
 | `LE_DIRECTORY` | No | LE production | Let's Encrypt directory URL |
 | `DNS_PROPAGATION_WAIT` | No | `30` | Seconds to wait after setting TXT record |
-| `ALLOWED_DOMAINS` | No | _(all)_ | Comma-separated base domains; empty means no restriction |
+| `ALLOWED_DOMAINS` | No | _(all)_ | Comma-separated base domains for extra restriction; HTTP-01 proof is always required |
 | `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
+| `CHALLENGE_HTTP_PORT` | No | `80` | Port the relay connects to on the client for HTTP-01 validation |
+| `CHALLENGE_TIMEOUT` | No | `5` | Seconds before an HTTP-01 fetch attempt times out |
+| `CHALLENGE_RETRIES` | No | `3` | Number of fetch attempts before failing the challenge |
+| `CHALLENGE_RETRY_DELAY` | No | `2` | Seconds between retry attempts |
 
 ### Restricting which domains can be issued
 
-By default Jackdaw will issue certificates for any domain. Set
-`ALLOWED_DOMAINS` to restrict issuance to specific base domains and their
-subdomains:
+HTTP-01 proof of control is always enforced — it is the primary authorization
+gate. `ALLOWED_DOMAINS` is an optional additional restriction: set it to limit
+issuance to specific base domains and their subdomains:
 
 ```bash
 ALLOWED_DOMAINS=example.com,example.org
