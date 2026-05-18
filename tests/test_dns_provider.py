@@ -50,6 +50,11 @@ def test_loader_rejects_unknown_provider() -> None:
         get_provider("no-such-provider")
 
 
+def test_loader_returns_provider_for_null() -> None:
+    provider = get_provider("null")
+    assert isinstance(provider, DNSProvider)
+
+
 # ---------------------------------------------------------------------------
 # Porkbun provider — HTTP payload verification via respx
 # ---------------------------------------------------------------------------
