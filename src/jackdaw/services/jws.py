@@ -91,9 +91,7 @@ async def _resolve_key_and_account(
             raise HTTPException(status_code=401, detail="Account is not active")
         return cast(JWK, JWK.from_json(json.loads(account.public_key))), account_id
 
-    raise HTTPException(
-        status_code=400, detail="JWS protected header must contain 'jwk' or 'kid'"
-    )
+    raise HTTPException(status_code=400, detail="JWS protected header must contain 'jwk' or 'kid'")
 
 
 def _verify_jws_signature(alg_name: str, jwk: JWK, signing_input: bytes, sig_bytes: bytes) -> None:
