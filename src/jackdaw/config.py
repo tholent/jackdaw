@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     le_verify_ssl: bool = True
     # HTTP-01 challenge validation settings.
     challenge_http_port: int = 80
-    challenge_timeout: int = 5   # seconds per attempt
+    challenge_timeout: int = 5  # seconds per attempt
     challenge_retries: int = 3
     challenge_retry_delay: int = 2  # seconds between retries
 

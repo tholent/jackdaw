@@ -42,9 +42,7 @@ async def require_order_owner(db: AsyncSession, order_id: str, account_id: str) 
     return order
 
 
-async def require_authz_owner(
-    db: AsyncSession, authz_id: str, account_id: str
-) -> Authorization:
+async def require_authz_owner(db: AsyncSession, authz_id: str, account_id: str) -> Authorization:
     """Return the Authorization if its parent order belongs to *account_id*.
 
     Args:
@@ -69,9 +67,7 @@ async def require_authz_owner(
     return authz
 
 
-async def require_cert_owner(
-    db: AsyncSession, cert_id: str, account_id: str
-) -> Certificate:
+async def require_cert_owner(db: AsyncSession, cert_id: str, account_id: str) -> Certificate:
     """Return the Certificate if its parent order belongs to *account_id*.
 
     Args:

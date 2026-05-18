@@ -248,18 +248,33 @@ async def challenge_setup():
     jwk_json = canonical_jwk(jwk_for_key(key))
 
     async with AsyncSessionLocal() as db:
-        db.add(Account(
-            id=acct_id, public_key=jwk_json, status="valid", created_at=datetime.now(UTC),
-        ))
-        db.add(Order(
-            id=ord_id, account_id=acct_id, status="pending",
-            identifiers=json.dumps([{"type": "dns", "value": "svc.internal"}]),
-            created_at=datetime.now(UTC),
-        ))
-        db.add(Authorization(
-            id=authz_id, order_id=ord_id, identifier="svc.internal",
-            status="pending", challenge_token=token, created_at=datetime.now(UTC),
-        ))
+        db.add(
+            Account(
+                id=acct_id,
+                public_key=jwk_json,
+                status="valid",
+                created_at=datetime.now(UTC),
+            )
+        )
+        db.add(
+            Order(
+                id=ord_id,
+                account_id=acct_id,
+                status="pending",
+                identifiers=json.dumps([{"type": "dns", "value": "svc.internal"}]),
+                created_at=datetime.now(UTC),
+            )
+        )
+        db.add(
+            Authorization(
+                id=authz_id,
+                order_id=ord_id,
+                identifier="svc.internal",
+                status="pending",
+                challenge_token=token,
+                created_at=datetime.now(UTC),
+            )
+        )
         await db.commit()
 
     expected = key_authorization(token, jwk_json)
@@ -343,13 +358,19 @@ async def test_challenge_route_returns_processing(
         id="chrt-acct", public_key=jwk_json, status="valid", created_at=datetime.now(UTC)
     )
     order = Order(
-        id="chrt-ord", account_id="chrt-acct", status="pending",
+        id="chrt-ord",
+        account_id="chrt-acct",
+        status="pending",
         identifiers=json.dumps([{"type": "dns", "value": "svc.internal"}]),
         created_at=datetime.now(UTC),
     )
     authz = Authorization(
-        id="chrt-authz", order_id="chrt-ord", identifier="svc.internal",
-        status="pending", challenge_token="chrt-token", created_at=datetime.now(UTC),
+        id="chrt-authz",
+        order_id="chrt-ord",
+        identifier="svc.internal",
+        status="pending",
+        challenge_token="chrt-token",
+        created_at=datetime.now(UTC),
     )
     db_session.add_all([account, order, authz])
     await db_session.commit()

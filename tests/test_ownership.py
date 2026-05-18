@@ -24,7 +24,9 @@ async def _create_account(client: AsyncClient, db: AsyncSession):
     body = build_jws(
         payload={"termsOfServiceAgreed": True},
         url="https://jackdaw.test/acme/new-account",
-        nonce=nonce, key=key, jwk=jwk,
+        nonce=nonce,
+        key=key,
+        jwk=jwk,
     )
     resp = await client.post("/acme/new-account", json=body, headers=_CT)
     assert resp.status_code == 201
@@ -37,7 +39,9 @@ async def _create_order(client: AsyncClient, db: AsyncSession, key, account_url:
     body = build_jws(
         payload={"identifiers": [{"type": "dns", "value": domain}]},
         url="https://jackdaw.test/acme/new-order",
-        nonce=nonce, key=key, kid=account_url,
+        nonce=nonce,
+        key=key,
+        kid=account_url,
     )
     resp = await client.post("/acme/new-order", json=body, headers=_CT)
     assert resp.status_code == 201
@@ -95,9 +99,7 @@ async def test_cross_account_finalize_returns_403(
     csr = (
         x509.CertificateSigningRequestBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "a.example.com")]))
-        .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("a.example.com")]), critical=False
-        )
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("a.example.com")]), critical=False)
         .sign(csr_key, hashes.SHA256())
     )
     csr_b64 = base64.urlsafe_b64encode(csr.public_bytes(Encoding.DER)).rstrip(b"=").decode()
@@ -166,9 +168,7 @@ async def test_cross_account_challenge_returns_403(
 # ---------------------------------------------------------------------------
 
 
-async def test_own_order_is_accessible(
-    test_client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_own_order_is_accessible(test_client: AsyncClient, db_session: AsyncSession) -> None:
     """Sanity check: an account can always access its own order."""
     key_a, url_a = await _create_account(test_client, db_session)
     order_url, _, _ = await _create_order(test_client, db_session, key_a, url_a, "a.example.com")
@@ -177,9 +177,7 @@ async def test_own_order_is_accessible(
     assert resp.status_code == 200
 
 
-async def test_own_authz_is_accessible(
-    test_client: AsyncClient, db_session: AsyncSession
-) -> None:
+async def test_own_authz_is_accessible(test_client: AsyncClient, db_session: AsyncSession) -> None:
     """Sanity check: an account can always access its own authorization."""
     key_a, url_a = await _create_account(test_client, db_session)
     _, _, authz_url = await _create_order(test_client, db_session, key_a, url_a, "a.example.com")

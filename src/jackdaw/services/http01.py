@@ -42,14 +42,14 @@ _MAX_RESPONSE_BYTES = 4096
 # services whose IPs live in those ranges.  What we block is the relay's own
 # loopback, link-local (cloud metadata), and other non-routable/protocol ranges.
 _BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
-    ipaddress.IPv4Network("127.0.0.0/8"),    # loopback
-    ipaddress.IPv4Network("169.254.0.0/16"), # link-local / cloud metadata (e.g. 169.254.169.254)
-    ipaddress.IPv4Network("0.0.0.0/8"),      # unspecified
-    ipaddress.IPv4Network("224.0.0.0/4"),    # multicast
-    ipaddress.IPv4Network("240.0.0.0/4"),    # reserved
-    ipaddress.IPv6Network("::1/128"),        # loopback
-    ipaddress.IPv6Network("fe80::/10"),      # link-local
-    ipaddress.IPv6Network("ff00::/8"),       # multicast
+    ipaddress.IPv4Network("127.0.0.0/8"),  # loopback
+    ipaddress.IPv4Network("169.254.0.0/16"),  # link-local / cloud metadata (e.g. 169.254.169.254)
+    ipaddress.IPv4Network("0.0.0.0/8"),  # unspecified
+    ipaddress.IPv4Network("224.0.0.0/4"),  # multicast
+    ipaddress.IPv4Network("240.0.0.0/4"),  # reserved
+    ipaddress.IPv6Network("::1/128"),  # loopback
+    ipaddress.IPv6Network("fe80::/10"),  # link-local
+    ipaddress.IPv6Network("ff00::/8"),  # multicast
 )
 
 
@@ -91,9 +91,7 @@ def _resolve_and_check(hostname: str) -> str:
     for _family, _type, _proto, _canonname, sockaddr in results:
         ip = str(sockaddr[0])
         if _is_blocked(ip):
-            raise Http01ValidationError(
-                f"Domain {hostname!r} resolves to blocked address {ip!r}"
-            )
+            raise Http01ValidationError(f"Domain {hostname!r} resolves to blocked address {ip!r}")
         if chosen_ip is None:
             chosen_ip = ip
 
@@ -157,8 +155,12 @@ async def validate_http01(
     for attempt in range(1, cfg.challenge_retries + 1):
         try:
             await _attempt_validation(
-                domain, cfg.challenge_http_port, url_path,
-                expected_key_auth, cfg.challenge_timeout, client_factory,
+                domain,
+                cfg.challenge_http_port,
+                url_path,
+                expected_key_auth,
+                cfg.challenge_timeout,
+                client_factory,
             )
             return  # success
         except Http01ValidationError:
@@ -166,7 +168,10 @@ async def validate_http01(
                 raise
             log.debug(
                 "HTTP-01 validation attempt %d/%d failed for %s — retrying in %ds",
-                attempt, cfg.challenge_retries, domain, cfg.challenge_retry_delay,
+                attempt,
+                cfg.challenge_retries,
+                domain,
+                cfg.challenge_retry_delay,
             )
             await asyncio.sleep(cfg.challenge_retry_delay)
 
@@ -224,9 +229,7 @@ async def _fetch_and_compare(  # noqa: ASYNC109
             f"HTTP-01 request timed out for {domain!r} after {request_timeout}s"
         ) from exc
     except httpx.RequestError as exc:
-        raise Http01ValidationError(
-            f"HTTP-01 request failed for {domain!r}: {exc}"
-        ) from exc
+        raise Http01ValidationError(f"HTTP-01 request failed for {domain!r}: {exc}") from exc
 
     if resp.status_code != 200:
         raise Http01ValidationError(
@@ -238,6 +241,4 @@ async def _fetch_and_compare(  # noqa: ASYNC109
         raise Http01ValidationError(f"HTTP-01 response body is empty for {domain!r}")
 
     if not hmac.compare_digest(body, expected):
-        raise Http01ValidationError(
-            f"HTTP-01 key authorization mismatch for {domain!r}"
-        )
+        raise Http01ValidationError(f"HTTP-01 key authorization mismatch for {domain!r}")
