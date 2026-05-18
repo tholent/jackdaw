@@ -226,7 +226,9 @@ perspective.
 | Provider | `DNS_PROVIDER` value | Status |
 |---|---|---|
 | [Porkbun](https://porkbun.com) | `porkbun` | Supported |
-| [Cloudflare](https://cloudflare.com) | `cloudflare` | Contributions welcome |
+| [Cloudflare](https://cloudflare.com) | `cloudflare` | Supported |
+| [Amazon Route 53](https://aws.amazon.com/route53/) | `route53` | Supported |
+| [Namecheap](https://www.namecheap.com) | `namecheap` | Supported |
 
 ### Adding a provider
 

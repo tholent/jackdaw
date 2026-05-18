@@ -13,6 +13,8 @@ from jackdaw.dns.base import DNSProvider
 _REGISTRY: dict[str, str] = {
     "porkbun": "jackdaw.dns.providers.porkbun.PorkbunDNSProvider",
     "cloudflare": "jackdaw.dns.providers.cloudflare.CloudflareDNSProvider",
+    "route53": "jackdaw.dns.providers.route53.Route53DNSProvider",
+    "namecheap": "jackdaw.dns.providers.namecheap.NamecheapDNSProvider",
     "null": "jackdaw.dns.providers.null.NullDNSProvider",
 }
 
