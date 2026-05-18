@@ -47,6 +47,77 @@ def _account_url_prefix() -> str:
     return _ACCOUNT_URL_PREFIX
 
 
+async def _resolve_key_and_account(
+    protected: dict[str, Any],
+    db: AsyncSession,
+) -> tuple[JWK, str]:
+    """Resolve the signing key and account ID from the protected header.
+
+    Returns ``(jwk, account_id)`` where ``account_id`` is an empty string for
+    ``newAccount`` requests (``jwk`` path).
+
+    Raises:
+        HTTPException(400): Invalid or missing ``jwk``/``kid``.
+        HTTPException(401): Unknown or deactivated account.
+    """
+    jwk_data: dict[str, Any] | None = protected.get("jwk")
+    kid: str | None = protected.get("kid")
+
+    if jwk_data is not None and kid is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="JWS protected header must contain 'jwk' or 'kid', not both",
+        )
+
+    if jwk_data is not None:
+        return cast(JWK, JWK.from_json(jwk_data)), ""
+
+    if kid is not None:
+        prefix = _account_url_prefix()
+        if not kid.startswith(prefix):
+            raise HTTPException(
+                status_code=400,
+                detail="JWS kid is not a valid account URL for this server",
+            )
+        account_id = kid[len(prefix) :].rstrip("/")
+        if not account_id:
+            raise HTTPException(status_code=400, detail="JWS kid is missing the account ID")
+
+        result = await db.execute(select(Account).where(Account.id == account_id))
+        account = result.scalar_one_or_none()
+        if account is None:
+            raise HTTPException(status_code=401, detail="Account not found")
+        if account.status != "valid":
+            raise HTTPException(status_code=401, detail="Account is not active")
+        return cast(JWK, JWK.from_json(json.loads(account.public_key))), account_id
+
+    raise HTTPException(
+        status_code=400, detail="JWS protected header must contain 'jwk' or 'kid'"
+    )
+
+
+def _verify_jws_signature(alg_name: str, jwk: JWK, signing_input: bytes, sig_bytes: bytes) -> None:
+    """Verify the JWS signature; raises HTTPException(400) on failure."""
+    try:
+        pub_key = jwk.public_key().key
+        valid = ALG_MAP[alg_name].verify(pub_key, signing_input, sig_bytes)
+    except Exception as exc:
+        log.debug("JWS signature check raised: %s", exc)
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=400, detail="JWS signature verification failed")
+
+
+def _decode_jws_payload(payload_b64: str) -> dict[str, Any]:
+    """Decode a base64url JWS payload; empty string returns ``{}``."""
+    if not payload_b64:
+        return {}
+    try:
+        return cast(dict[str, Any], json.loads(b64url_decode(payload_b64)))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JWS payload encoding") from exc
+
+
 async def verify_jws(
     request: Request,
     db: AsyncSession,
@@ -94,85 +165,20 @@ async def verify_jws(
         raise HTTPException(status_code=400, detail="Invalid JWS protected header") from exc
 
     alg_name: str = protected.get("alg", "")
-    nonce_val: str = protected.get("nonce", "")
-    url_val: str = protected.get("url", "")
-
     if alg_name not in _ALLOWED_ALGS:
         raise HTTPException(status_code=400, detail=f"Unsupported JWS algorithm: {alg_name!r}")
 
-    # The URL in the protected header must exactly match the request URL.
-    if url_val != str(request.url):
+    if protected.get("url") != str(request.url):
         raise HTTPException(status_code=400, detail="JWS url claim does not match request URL")
 
-    # RFC 8555 §6.2: exactly one of 'jwk' or 'kid' must be present, not both.
-    jwk_data: dict[str, Any] | None = protected.get("jwk")
-    kid: str | None = protected.get("kid")
+    jwk, account_id = await _resolve_key_and_account(protected, db)
 
-    if jwk_data is not None and kid is not None:
-        raise HTTPException(
-            status_code=400,
-            detail="JWS protected header must contain 'jwk' or 'kid', not both",
-        )
-
-    # Resolve the public key and derive account_id.
-    account_id = ""
-
-    if jwk_data is not None:
-        # newAccount: key is embedded; no account row exists yet.
-        jwk = cast(JWK, JWK.from_json(jwk_data))
-
-    elif kid is not None:
-        # All post-account requests: kid must be the canonical account URL issued
-        # by this relay.  Extract the UUID from the known prefix to avoid treating
-        # arbitrary attacker-controlled URLs as valid account identifiers.
-        prefix = _account_url_prefix()
-        if not kid.startswith(prefix):
-            raise HTTPException(
-                status_code=400,
-                detail="JWS kid is not a valid account URL for this server",
-            )
-        account_id = kid[len(prefix) :].rstrip("/")
-        if not account_id:
-            raise HTTPException(status_code=400, detail="JWS kid is missing the account ID")
-
-        result = await db.execute(select(Account).where(Account.id == account_id))
-        account = result.scalar_one_or_none()
-        if account is None:
-            raise HTTPException(status_code=401, detail="Account not found")
-        if account.status != "valid":
-            raise HTTPException(status_code=401, detail="Account is not active")
-        jwk = cast(JWK, JWK.from_json(json.loads(account.public_key)))
-
-    else:
-        raise HTTPException(
-            status_code=400, detail="JWS protected header must contain 'jwk' or 'kid'"
-        )
-
-    # Verify: signing_input = ASCII(base64url(protected) || '.' || base64url(payload))
     signing_input = f"{protected_b64}.{payload_b64}".encode("ascii")
     sig_bytes = b64url_decode(signature_b64)
-    alg = ALG_MAP[alg_name]
-
-    try:
-        pub_key = jwk.public_key().key
-        valid = alg.verify(pub_key, signing_input, sig_bytes)
-    except Exception as exc:
-        log.debug("JWS signature check raised: %s", exc)
-        valid = False
-
-    if not valid:
-        raise HTTPException(status_code=400, detail="JWS signature verification failed")
+    _verify_jws_signature(alg_name, jwk, signing_input, sig_bytes)
 
     # Consume nonce only after the signature is verified so a bad request cannot
     # burn a valid nonce (preventing the legitimate client from using it).
-    await consume_nonce(nonce_val, db)
+    await consume_nonce(protected.get("nonce", ""), db)
 
-    # Decode payload (empty string is valid — used for challenge acknowledgement).
-    payload_dict: dict[str, Any] = {}
-    if payload_b64:
-        try:
-            payload_dict = json.loads(b64url_decode(payload_b64))
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="Invalid JWS payload encoding") from exc
-
-    return payload_dict, account_id
+    return _decode_jws_payload(payload_b64), account_id
