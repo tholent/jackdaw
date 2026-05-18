@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 
 
 _LE_PRODUCTION_URL = "https://acme-v02.api.letsencrypt.org/directory"
+_CERT_FILENAME = "fullchain.pem"
+_KEY_FILENAME = "privkey.pem"
 
 
 async def _reset_processing_orders() -> None:
@@ -65,12 +67,12 @@ def _write_relay_cert(cert_path: Path, key_path: Path, pem_chain: str, key_pem: 
 def _relay_cert_exists() -> bool:
     """Return True if both cert and key files are already present."""
     ssl_dir = Path(get_settings().ssl_dir)
-    return (ssl_dir / "fullchain.pem").exists() and (ssl_dir / "privkey.pem").exists()
+    return (ssl_dir / _CERT_FILENAME).exists() and (ssl_dir / _KEY_FILENAME).exists()
 
 
 def _relay_cert_days_remaining() -> float | None:
     """Return days until fullchain.pem expires, or None if missing or unreadable."""
-    cert_path = Path(get_settings().ssl_dir) / "fullchain.pem"
+    cert_path = Path(get_settings().ssl_dir) / _CERT_FILENAME
     if not cert_path.exists():
         return None
     try:
@@ -131,8 +133,8 @@ async def _bootstrap_relay_cert(
         ssl_dir = Path(get_settings().ssl_dir)
         await asyncio.to_thread(
             _write_relay_cert,
-            ssl_dir / "fullchain.pem",
-            ssl_dir / "privkey.pem",
+            ssl_dir / _CERT_FILENAME,
+            ssl_dir / _KEY_FILENAME,
             pem_chain,
             key_pem,
         )
@@ -183,12 +185,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     prune_task = asyncio.create_task(_prune_loop())
     renewal_task = asyncio.create_task(_renewal_loop(client, settings.relay_domain))
-    asyncio.create_task(_bootstrap_relay_cert(client, settings.relay_domain))
+    bootstrap_task = asyncio.create_task(_bootstrap_relay_cert(client, settings.relay_domain))
 
     yield
 
     prune_task.cancel()
     renewal_task.cancel()
+    bootstrap_task.cancel()
 
 
 # ---------------------------------------------------------------------------
