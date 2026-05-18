@@ -55,6 +55,10 @@ ALLOWED_DOMAINS=(
     "raw.githubusercontent.com"
     "objects.githubusercontent.com"
     "codeload.github.com"
+
+    # --- SonarQube and documentation
+    "sonarqube.com"
+    "docs.sonarsource.com"
 )
 
 log() {
