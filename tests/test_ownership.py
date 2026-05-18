@@ -7,10 +7,21 @@ resource.
 
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from jackdaw.db.models import Account, Certificate, Order
 from jackdaw.services.nonce import generate_nonce
+from jackdaw.services.ownership import (
+    require_authz_owner,
+    require_cert_owner,
+    require_order_owner,
+)
 from tests.conftest import build_jws, jwk_for_key, make_ec_key
 
 _CT = {"Content-Type": "application/jose+json"}
@@ -184,3 +195,178 @@ async def test_own_authz_is_accessible(test_client: AsyncClient, db_session: Asy
 
     resp = await _post_as_get(test_client, db_session, key_a, url_a, authz_url)
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 404 paths — resource does not exist (direct service tests)
+# ---------------------------------------------------------------------------
+
+
+async def test_require_order_owner_not_found_raises_404(db_session: AsyncSession) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await require_order_owner(db_session, str(uuid.uuid4()), "any-account")
+    assert exc_info.value.status_code == 404
+
+
+async def test_require_authz_owner_not_found_raises_404(db_session: AsyncSession) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await require_authz_owner(db_session, str(uuid.uuid4()), "any-account")
+    assert exc_info.value.status_code == 404
+
+
+async def test_require_cert_owner_not_found_raises_404(db_session: AsyncSession) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await require_cert_owner(db_session, str(uuid.uuid4()), "any-account")
+    assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# require_cert_owner — 403 and success paths
+# ---------------------------------------------------------------------------
+
+
+async def _insert_cert(db: AsyncSession, account_id: str) -> str:
+    """Insert account → order → certificate rows; return the certificate UUID."""
+    order_id = str(uuid.uuid4())
+    db.add(
+        Account(
+            id=account_id,
+            public_key='{"kty":"EC","crv":"P-256","x":"a","y":"b"}',
+            status="valid",
+            created_at=datetime.now(UTC),
+        )
+    )
+    db.add(
+        Order(
+            id=order_id,
+            account_id=account_id,
+            status="valid",
+            identifiers='[{"type":"dns","value":"example.com"}]',
+            created_at=datetime.now(UTC),
+        )
+    )
+    cert_id = str(uuid.uuid4())
+    db.add(
+        Certificate(
+            id=cert_id,
+            order_id=order_id,
+            pem_chain="-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n",
+            issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=90),
+        )
+    )
+    await db.commit()
+    return cert_id
+
+
+async def test_require_cert_owner_wrong_account_raises_403(db_session: AsyncSession) -> None:
+    account_id = str(uuid.uuid4())
+    cert_id = await _insert_cert(db_session, account_id)
+    with pytest.raises(HTTPException) as exc_info:
+        await require_cert_owner(db_session, cert_id, "different-account-id")
+    assert exc_info.value.status_code == 403
+
+
+async def test_require_cert_owner_returns_cert_for_owner(db_session: AsyncSession) -> None:
+    account_id = str(uuid.uuid4())
+    cert_id = await _insert_cert(db_session, account_id)
+    cert = await require_cert_owner(db_session, cert_id, account_id)
+    assert cert.id == cert_id
+
+
+# ---------------------------------------------------------------------------
+# cert_store service: store_cert and get_cert
+# ---------------------------------------------------------------------------
+
+from jackdaw.services.cert_store import get_cert, store_cert  # noqa: E402
+
+
+async def _insert_account_and_order(db: AsyncSession) -> str:
+    """Insert a minimal account + order and return the order UUID."""
+    account_id = str(uuid.uuid4())
+    order_id = str(uuid.uuid4())
+    db.add(
+        Account(
+            id=account_id,
+            public_key='{"kty":"EC","crv":"P-256","x":"a","y":"b"}',
+            status="valid",
+            created_at=datetime.now(UTC),
+        )
+    )
+    db.add(
+        Order(
+            id=order_id,
+            account_id=account_id,
+            status="valid",
+            identifiers='[{"type":"dns","value":"example.com"}]',
+            created_at=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+    return order_id
+
+
+async def test_store_cert_returns_uuid_and_is_retrievable(db_session: AsyncSession) -> None:
+    order_id = await _insert_account_and_order(db_session)
+    pem = "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n"
+    expires = datetime.now(UTC) + timedelta(days=90)
+
+    cert_id = await store_cert(db_session, order_id, pem, expires)
+
+    assert cert_id  # non-empty string
+    retrieved = await get_cert(db_session, cert_id)
+    assert retrieved == pem
+
+
+async def test_get_cert_not_found_raises_404(db_session: AsyncSession) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await get_cert(db_session, str(uuid.uuid4()))
+    assert exc_info.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# cert route: POST-as-GET /acme/cert/{cert_id}
+# ---------------------------------------------------------------------------
+
+
+async def test_cert_download_returns_pem_chain(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Owner can POST-as-GET to retrieve their certificate."""
+    key, account_url = await _create_account(test_client, db_session)
+
+    # Insert an order and cert directly into the DB.
+    account_id = account_url.rsplit("/", 1)[-1]
+    order_id = await _insert_account_and_order(db_session)
+    # The order created by _insert_account_and_order belongs to a *different* account_id.
+    # We need the cert to belong to the account we just created via HTTP.
+    # Re-insert an order for the real account_id.
+    real_order_id = str(uuid.uuid4())
+    db_session.add(
+        Order(
+            id=real_order_id,
+            account_id=account_id,
+            status="valid",
+            identifiers='[{"type":"dns","value":"example.com"}]',
+            created_at=datetime.now(UTC),
+        )
+    )
+    pem = "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n"
+    cert_id = str(uuid.uuid4())
+    db_session.add(
+        Certificate(
+            id=cert_id,
+            order_id=real_order_id,
+            pem_chain=pem,
+            issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=90),
+        )
+    )
+    await db_session.commit()
+
+    nonce = await generate_nonce(db_session)
+    cert_url = f"https://jackdaw.test/acme/cert/{cert_id}"
+    body = build_jws(payload=None, url=cert_url, nonce=nonce, key=key, kid=account_url)
+    resp = await test_client.post(f"/acme/cert/{cert_id}", json=body, headers=_CT)
+    assert resp.status_code == 200
+    assert "BEGIN CERTIFICATE" in resp.text
