@@ -2,9 +2,11 @@
 
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw.config import get_settings
@@ -24,7 +26,10 @@ async def generate_nonce(db: AsyncSession) -> str:
 
 
 async def consume_nonce(value: str, db: AsyncSession) -> None:
-    """Mark *value* as used; raise HTTP 400 if invalid, reused, or expired.
+    """Atomically mark *value* as used; raise HTTP 400 if invalid, reused, or expired.
+
+    Uses a single UPDATE ... WHERE to avoid the SELECT-then-UPDATE TOCTOU race
+    that would allow concurrent requests to consume the same nonce.
 
     Args:
         value: The nonce string from the JWS protected header.
@@ -33,19 +38,19 @@ async def consume_nonce(value: str, db: AsyncSession) -> None:
     Raises:
         HTTPException(400): Nonce not found, already used, or past TTL.
     """
-    result = await db.execute(select(Nonce).where(Nonce.value == value))
-    nonce = result.scalar_one_or_none()
-
-    if nonce is None or nonce.used:
-        raise HTTPException(status_code=400, detail="Invalid or already-used nonce")
-
-    # created_at is stored as naive UTC; treat it as UTC for age calculation.
-    age = (datetime.now(UTC) - nonce.created_at.replace(tzinfo=UTC)).total_seconds()
-    if age > get_settings().nonce_ttl:
-        raise HTTPException(status_code=400, detail="Nonce expired")
-
-    nonce.used = True
+    # created_at is stored as naive UTC; compute cutoff as naive UTC too.
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=get_settings().nonce_ttl)
+    cursor = cast(
+        CursorResult[tuple[()]],
+        await db.execute(
+            update(Nonce)
+            .where(Nonce.value == value, ~Nonce.used, Nonce.created_at >= cutoff)
+            .values(used=True)
+        ),
+    )
     await db.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=400, detail="Invalid, already-used, or expired nonce")
 
 
 async def prune_nonces(db: AsyncSession) -> None:
