@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Environment — never commit real credentials
+.env
+.env.local
+.env.*.local
+
+# Runtime data — certs, DB, LE account key
+data/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+
+# Claude Code session data
+.claude/

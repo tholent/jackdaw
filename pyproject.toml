@@ -1,0 +1,78 @@
+[project]
+name = "jackdaw"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "gufo-acme>=0.6",
+  "josepy>=1.14",
+  "cryptography>=42",
+  "httpx>=0.27",
+  "sqlalchemy[asyncio]>=2.0",
+  "aiosqlite>=0.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jackdaw"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "respx>=0.21",
+  "mypy>=1.10",
+  "ruff>=0.4",
+  "sqlalchemy[mypy]>=2.0",
+]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "E",     # pycodestyle errors
+  "W",     # pycodestyle warnings
+  "F",     # pyflakes
+  "I",     # isort
+  "UP",    # pyupgrade
+  "B",     # flake8-bugbear
+  "S",     # flake8-bandit (security)
+  "ASYNC", # flake8-async
+]
+ignore = [
+  "S101", # assert statements (fine in tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S106", "S501"]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+
+[[tool.mypy.overrides]]
+module = ["gufo.acme.*", "gufo.acme", "josepy.*"]
+ignore_errors = true
