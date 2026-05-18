@@ -45,8 +45,9 @@ testpaths = ["tests"]
 # coverage
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
-source = ["src/jackdaw"]
+source = ["jackdaw"]
 branch = true
+relative_files = true
 
 [tool.coverage.report]
 show_missing = true
