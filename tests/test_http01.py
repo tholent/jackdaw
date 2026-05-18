@@ -1,0 +1,372 @@
+"""Tests for C1: HTTP-01 challenge validation.
+
+Covers:
+- key_authorization() format correctness
+- SSRF guard (loopback, link-local rejected)
+- validate_http01() success, wrong key-auth, HTTP error, timeout
+- worker.run_challenge() integration (authz/order state transitions)
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from jackdaw.db.models import Account, Authorization, Order
+from jackdaw.services.http01 import (
+    Http01ValidationError,
+    _resolve_and_check,
+    key_authorization,
+    validate_http01,
+)
+from jackdaw.services.nonce import generate_nonce
+from tests.conftest import build_jws, jwk_for_key, make_ec_key
+
+_CT = {"Content-Type": "application/jose+json"}
+
+# ---------------------------------------------------------------------------
+# key_authorization()
+# ---------------------------------------------------------------------------
+
+
+def _make_account_jwk_json() -> str:
+    """Build a canonical JWK JSON string for a fresh EC key."""
+    from jackdaw._util import canonical_jwk
+
+    key = make_ec_key()
+    return canonical_jwk(jwk_for_key(key))
+
+
+def test_key_authorization_format() -> None:
+    """key_authorization() must return 'token.thumbprint' (no newline, no padding)."""
+    token = "abc123"
+    jwk_json = _make_account_jwk_json()
+    result = key_authorization(token, jwk_json)
+
+    assert result.startswith(f"{token}.")
+    parts = result.split(".")
+    assert len(parts) == 2
+    # Thumbprint is base64url without padding.
+    thumb = parts[1]
+    assert "=" not in thumb
+    assert " " not in thumb
+    assert "\n" not in thumb
+
+
+def test_key_authorization_is_deterministic() -> None:
+    """Same token + key always produces the same key authorization."""
+    token = "my-token"
+    jwk_json = _make_account_jwk_json()
+    assert key_authorization(token, jwk_json) == key_authorization(token, jwk_json)
+
+
+def test_key_authorization_differs_by_key() -> None:
+    """Different account keys produce different key authorizations for the same token."""
+    token = "shared-token"
+    jwk1 = _make_account_jwk_json()
+    jwk2 = _make_account_jwk_json()
+    assert key_authorization(token, jwk1) != key_authorization(token, jwk2)
+
+
+# ---------------------------------------------------------------------------
+# SSRF guard (_resolve_and_check)
+# ---------------------------------------------------------------------------
+
+
+def test_ssrf_loopback_rejected() -> None:
+    """Hostnames resolving to 127.x addresses must be rejected."""
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [
+            (2, 1, 6, "", ("127.0.0.1", 0)),
+        ]
+        with pytest.raises(Http01ValidationError, match="blocked"):
+            _resolve_and_check("localhost")
+
+
+def test_ssrf_link_local_rejected() -> None:
+    """169.254.x.x (cloud metadata) addresses must be rejected."""
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [
+            (2, 1, 6, "", ("169.254.169.254", 0)),
+        ]
+        with pytest.raises(Http01ValidationError, match="blocked"):
+            _resolve_and_check("metadata.internal")
+
+
+def test_ssrf_private_range_allowed() -> None:
+    """RFC 1918 addresses must NOT be blocked (internal clients live there)."""
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [
+            (2, 1, 6, "", ("10.0.0.5", 0)),
+        ]
+        ip = _resolve_and_check("internal-service.local")
+        assert ip == "10.0.0.5"
+
+
+def test_ssrf_dns_failure_raises() -> None:
+    """DNS resolution failure must raise Http01ValidationError."""
+
+    with patch("jackdaw.services.http01.socket.getaddrinfo", side_effect=OSError("NXDOMAIN")):
+        with pytest.raises(Http01ValidationError, match="DNS resolution failed"):
+            _resolve_and_check("nonexistent.invalid")
+
+
+# ---------------------------------------------------------------------------
+# validate_http01() — mocked httpx transport
+# ---------------------------------------------------------------------------
+
+
+def _make_client_factory(status: int, body: str) -> Any:
+    """Return a client_factory that always responds with *status* and *body*."""
+
+    def factory():
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_response = MagicMock()
+        mock_response.status_code = status
+        mock_response.content = body.encode()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        return mock_client
+
+    return factory
+
+
+async def test_validate_http01_success() -> None:
+    """validate_http01 must not raise when the response matches the expected key auth."""
+    jwk_json = _make_account_jwk_json()
+    token = "valid-token"
+    expected = key_authorization(token, jwk_json)
+
+    await validate_http01(
+        "service.internal",
+        token,
+        expected,
+        client_factory=_make_client_factory(200, expected),
+    )
+
+
+async def test_validate_http01_wrong_key_auth_raises() -> None:
+    """validate_http01 must raise Http01ValidationError when key auth doesn't match."""
+    jwk_json = _make_account_jwk_json()
+    token = "token"
+    expected = key_authorization(token, jwk_json)
+
+    with pytest.raises(Http01ValidationError, match="mismatch"):
+        await validate_http01(
+            "service.internal",
+            token,
+            expected,
+            client_factory=_make_client_factory(200, "wrong-value"),
+        )
+
+
+async def test_validate_http01_http_error_raises() -> None:
+    """A non-200 HTTP status must raise Http01ValidationError."""
+    jwk_json = _make_account_jwk_json()
+    token = "token"
+    expected = key_authorization(token, jwk_json)
+
+    with pytest.raises(Http01ValidationError, match="status 404"):
+        await validate_http01(
+            "service.internal",
+            token,
+            expected,
+            client_factory=_make_client_factory(404, "Not Found"),
+        )
+
+
+async def test_validate_http01_empty_body_raises() -> None:
+    """An empty response body must raise Http01ValidationError."""
+    jwk_json = _make_account_jwk_json()
+    token = "token"
+    expected = key_authorization(token, jwk_json)
+
+    with pytest.raises(Http01ValidationError, match="empty"):
+        await validate_http01(
+            "service.internal",
+            token,
+            expected,
+            client_factory=_make_client_factory(200, ""),
+        )
+
+
+async def test_validate_http01_timeout_raises() -> None:
+    """A connection timeout must raise Http01ValidationError."""
+    jwk_json = _make_account_jwk_json()
+    token = "token"
+    expected = key_authorization(token, jwk_json)
+
+    def timeout_factory():
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        return mock_client
+
+    with pytest.raises(Http01ValidationError, match="timed out"):
+        await validate_http01(
+            "service.internal",
+            token,
+            expected,
+            client_factory=timeout_factory,
+        )
+
+
+# ---------------------------------------------------------------------------
+# worker.run_challenge() — state machine integration
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture()
+async def challenge_setup():
+    """Insert account + order + authz into the module-level DB (used by the worker).
+
+    The worker calls ``AsyncSessionLocal()`` directly, so test data must live
+    in the same engine the worker accesses, not in the per-test ``db_session``.
+    Unique UUIDs are used so concurrent fixture invocations don't collide.
+    Rows are cleaned up after the test.
+    """
+    import uuid
+    from datetime import UTC, datetime
+
+    from jackdaw._util import canonical_jwk
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    acct_id = f"acct-{uuid.uuid4()}"
+    ord_id = f"ord-{uuid.uuid4()}"
+    authz_id = f"authz-{uuid.uuid4()}"
+    token = "test-token-abc"
+
+    key = make_ec_key()
+    jwk_json = canonical_jwk(jwk_for_key(key))
+
+    async with AsyncSessionLocal() as db:
+        db.add(Account(
+            id=acct_id, public_key=jwk_json, status="valid", created_at=datetime.now(UTC),
+        ))
+        db.add(Order(
+            id=ord_id, account_id=acct_id, status="pending",
+            identifiers=json.dumps([{"type": "dns", "value": "svc.internal"}]),
+            created_at=datetime.now(UTC),
+        ))
+        db.add(Authorization(
+            id=authz_id, order_id=ord_id, identifier="svc.internal",
+            status="pending", challenge_token=token, created_at=datetime.now(UTC),
+        ))
+        await db.commit()
+
+    expected = key_authorization(token, jwk_json)
+    yield {"acct_id": acct_id, "ord_id": ord_id, "authz_id": authz_id, "expected": expected}
+
+    # Cleanup.
+    from sqlalchemy import delete
+
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Authorization).where(Authorization.id == authz_id))
+        await db.execute(delete(Order).where(Order.id == ord_id))
+        await db.execute(delete(Account).where(Account.id == acct_id))
+        await db.commit()
+
+
+async def test_run_challenge_success_advances_status(challenge_setup: dict) -> None:
+    """On HTTP-01 success, authz→valid and order→ready."""
+    from jackdaw import worker
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    authz_id = challenge_setup["authz_id"]
+    ord_id = challenge_setup["ord_id"]
+
+    with patch("jackdaw.worker.validate_http01", new=AsyncMock(return_value=None)):
+        await worker.run_challenge(authz_id=authz_id, order_id=ord_id)
+
+    async with AsyncSessionLocal() as db:
+        authz = await db.get(Authorization, authz_id)
+        order = await db.get(Order, ord_id)
+
+    assert authz is not None and authz.status == "valid"
+    assert order is not None and order.status == "ready"
+
+
+async def test_run_challenge_failure_sets_invalid(challenge_setup: dict) -> None:
+    """On HTTP-01 validation failure, authz→invalid and order→invalid."""
+    from jackdaw import worker
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    authz_id = challenge_setup["authz_id"]
+    ord_id = challenge_setup["ord_id"]
+
+    with patch(
+        "jackdaw.worker.validate_http01",
+        new=AsyncMock(side_effect=Http01ValidationError("key auth mismatch")),
+    ):
+        await worker.run_challenge(authz_id=authz_id, order_id=ord_id)
+
+    async with AsyncSessionLocal() as db:
+        authz = await db.get(Authorization, authz_id)
+        order = await db.get(Order, ord_id)
+
+    assert authz is not None and authz.status == "invalid"
+    assert order is not None and order.status == "invalid"
+
+
+# ---------------------------------------------------------------------------
+# Challenge route — processing state set before task launches
+# ---------------------------------------------------------------------------
+
+
+async def test_challenge_route_returns_processing(
+    test_client: Any, db_session: AsyncSession
+) -> None:
+    """POST /acme/challenge/{id} must return status=processing immediately."""
+    from httpx import AsyncClient
+
+    assert isinstance(test_client, AsyncClient)
+
+    from datetime import UTC, datetime
+
+    from jackdaw._util import canonical_jwk
+    from jackdaw.db.models import Account, Authorization, Order
+
+    # Set up account+order+authz directly in the test DB.
+    key = make_ec_key()
+    jwk_json = canonical_jwk(jwk_for_key(key))
+    account = Account(
+        id="chrt-acct", public_key=jwk_json, status="valid", created_at=datetime.now(UTC)
+    )
+    order = Order(
+        id="chrt-ord", account_id="chrt-acct", status="pending",
+        identifiers=json.dumps([{"type": "dns", "value": "svc.internal"}]),
+        created_at=datetime.now(UTC),
+    )
+    authz = Authorization(
+        id="chrt-authz", order_id="chrt-ord", identifier="svc.internal",
+        status="pending", challenge_token="chrt-token", created_at=datetime.now(UTC),
+    )
+    db_session.add_all([account, order, authz])
+    await db_session.commit()
+
+    challenge_url = "https://jackdaw.test/acme/challenge/chrt-authz"
+    nonce = await generate_nonce(db_session)
+    body = build_jws(
+        payload={},
+        url=challenge_url,
+        nonce=nonce,
+        key=key,
+        kid="https://jackdaw.test/acme/account/chrt-acct",
+    )
+
+    # Patch the background task so it doesn't make real HTTP calls.
+    with patch("jackdaw.worker.validate_http01", new=AsyncMock(return_value=None)):
+        resp = await test_client.post("/acme/challenge/chrt-authz", json=body, headers=_CT)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"

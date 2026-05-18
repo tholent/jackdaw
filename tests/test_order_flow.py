@@ -19,7 +19,7 @@ import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -165,7 +165,11 @@ async def pebble_client() -> AsyncGenerator[AsyncClient, None]:
 
 
 async def test_full_order_flow(pebble_client: AsyncClient) -> None:
-    """Happy-path end-to-end: directory → nonce → account → order → cert."""
+    """Happy-path end-to-end: directory → nonce → account → order → cert.
+
+    The relay's HTTP-01 leg is mocked out here — it is tested independently
+    in tests/test_http01.py.  This test exercises the LE/Pebble leg only.
+    """
     domain = "test.example.com"
 
     # Step 1: GET /directory
@@ -240,6 +244,8 @@ async def test_full_order_flow(pebble_client: AsyncClient) -> None:
     challenge_path = challenge["url"].replace("https://jackdaw.test", "")
 
     # Step 6: POST /acme/challenge/{id}
+    # Patch HTTP-01 validation to succeed instantly; Pebble (PEBBLE_VA_ALWAYS_VALID=1)
+    # handles its own challenge validation independently on the LE leg.
     async with AsyncSessionLocal() as db:
         nonce = await generate_nonce(db)
     chall_body = build_jws(
@@ -249,11 +255,12 @@ async def test_full_order_flow(pebble_client: AsyncClient) -> None:
         key=account_key,
         kid=account_url,
     )
-    chall_resp = await pebble_client.post(
-        challenge_path,
-        json=chall_body,
-        headers={"Content-Type": "application/jose+json"},
-    )
+    with patch("jackdaw.worker.validate_http01", new=AsyncMock(return_value=None)):
+        chall_resp = await pebble_client.post(
+            challenge_path,
+            json=chall_body,
+            headers={"Content-Type": "application/jose+json"},
+        )
     assert chall_resp.status_code == 200
 
     # Step 7: Poll until order is ready

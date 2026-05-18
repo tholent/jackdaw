@@ -23,6 +23,8 @@ os.environ.setdefault("RELAY_DOMAIN", "jackdaw.test")
 os.environ.setdefault("ACME_EMAIL", "test@example.com")
 os.environ.setdefault("PORKBUN_API_KEY", "pk1_test")
 os.environ.setdefault("PORKBUN_SECRET_API_KEY", "sk1_test")
+# Prevent .env file from leaking ALLOWED_DOMAINS into the test suite.
+os.environ.setdefault("ALLOWED_DOMAINS", "")
 
 import pytest_asyncio  # noqa: E402
 from cryptography.hazmat.primitives import hashes  # noqa: E402
