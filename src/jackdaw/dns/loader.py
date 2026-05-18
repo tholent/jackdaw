@@ -11,9 +11,9 @@ from jackdaw.dns.base import DNSProvider
 
 # Maps the DNS_PROVIDER env-var value to a fully-qualified class path.
 _REGISTRY: dict[str, str] = {
-    "porkbun":    "jackdaw.dns.providers.porkbun.PorkbunDNSProvider",
+    "porkbun": "jackdaw.dns.providers.porkbun.PorkbunDNSProvider",
     "cloudflare": "jackdaw.dns.providers.cloudflare.CloudflareDNSProvider",
-    "null":       "jackdaw.dns.providers.null.NullDNSProvider",
+    "null": "jackdaw.dns.providers.null.NullDNSProvider",
 }
 
 

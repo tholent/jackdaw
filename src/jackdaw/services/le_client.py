@@ -103,9 +103,7 @@ class JackdawAcmeClient(AcmeClient):
             validate_cert=self._verify_ssl,
         )
 
-    async def get_authorization_status(
-        self, auth: AcmeAuthorization
-    ) -> AcmeAuthorizationStatus:
+    async def get_authorization_status(self, auth: AcmeAuthorization) -> AcmeAuthorizationStatus:
         # gufo-acme 0.6.0 crashes on challenge types that have no `token` field
         # (e.g. Pebble's device-attest-01). Filter those out before constructing
         # AcmeChallenge objects so gufo-acme only sees the standard challenge types.
@@ -148,9 +146,7 @@ class JackdawAcmeClient(AcmeClient):
         it from finalize but does include it in new_order, which we capture in
         our new_order() override above.
         """
-        resp = await self._post(
-            order.finalize, {"csr": encode_b64jose(self._pem_to_der(csr))}
-        )
+        resp = await self._post(order.finalize, {"csr": encode_b64jose(self._pem_to_der(csr))})
         self._get_order_status(resp)
 
         location = resp.headers.get("Location", None)
