@@ -160,3 +160,58 @@ async def test_revoke_cert_missing_payload(
     )
     resp = await test_client.post("/acme/revoke-cert", json=body, headers=_CT)
     assert resp.status_code == 400
+
+
+async def test_revoke_cert_bad_der_returns_400(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """'certificate' field with invalid base64url/DER must return 400."""
+    key, account_url = await _create_account(test_client, db_session)
+    nonce = await generate_nonce(db_session)
+    body = build_jws(
+        payload={"certificate": "not-valid-der!!!"},
+        url="https://jackdaw.test/acme/revoke-cert",
+        nonce=nonce,
+        key=key,
+        kid=account_url,
+    )
+    resp = await test_client.post("/acme/revoke-cert", json=body, headers=_CT)
+    assert resp.status_code == 400
+    assert "Invalid certificate DER" in resp.text
+
+
+async def test_revoke_cert_le_failure_returns_500(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """When the LE revocation call fails, the route must return 500."""
+    from jackdaw.main import app
+
+    key, account_url = await _create_account(test_client, db_session)
+    account_id = account_url.rsplit("/", 1)[-1]
+
+    pem, der_b64 = _make_cert()
+    await _insert_cert_for_account(db_session, account_id, pem)
+
+    nonce = await generate_nonce(db_session)
+    body = build_jws(
+        payload={"certificate": der_b64, "reason": 1},
+        url="https://jackdaw.test/acme/revoke-cert",
+        nonce=nonce,
+        key=key,
+        kid=account_url,
+    )
+
+    mock_dir = MagicMock()
+    mock_dir.revoke_cert = "https://acme-v02.api.letsencrypt.org/acme/revoke-cert"
+    mock_le = MagicMock()
+    mock_le._get_directory = AsyncMock(return_value=mock_dir)
+    mock_le._post = AsyncMock(side_effect=RuntimeError("LE unavailable"))
+
+    app.state.le_client = mock_le
+    try:
+        resp = await test_client.post("/acme/revoke-cert", json=body, headers=_CT)
+    finally:
+        del app.state.le_client
+
+    assert resp.status_code == 500
+    assert "serverInternal" in resp.text
