@@ -1,0 +1,294 @@
+"""Let's Encrypt ACME client built on gufo-acme.
+
+Jackdaw maintains a single shared LE account whose keypair lives on the
+data volume.  This module:
+
+- Subclasses ``AcmeClient`` to fulfil DNS-01 challenges via a ``DNSProvider``.
+- Loads (or creates) the account key on disk.
+- Registers the account with LE on first run.
+- Exposes ``order_cert()`` which submits a client-supplied CSR and returns
+  the PEM certificate chain.
+
+The ``JackdawAcmeClient`` constructor accepts ``dns_provider`` and
+``propagation_wait`` in addition to all standard ``AcmeClient`` kwargs.
+"""
+
+import asyncio
+import base64
+import hashlib
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    load_pem_private_key,
+)
+from cryptography.x509 import load_der_x509_csr
+from gufo.acme.clients.base import (  # type: ignore[attr-defined]
+    AcmeAuthorizationStatus,
+    AcmeClient,
+    AcmeOrder,
+)
+from gufo.acme.error import AcmeCertificateError
+from gufo.acme.types import AcmeAuthorization, AcmeChallenge
+from gufo.http.async_client import HttpClient
+from josepy.json_util import encode_b64jose
+from josepy.jwa import ES256
+from josepy.jwk import JWKEC
+
+from jackdaw.config import get_settings
+from jackdaw.dns.base import DNSProvider
+
+log = logging.getLogger(__name__)
+
+
+def _apex_domain(domain: str) -> str:
+    """Return the last two labels of *domain* as the apex (registrable) domain.
+
+    For most common use-cases (e.g. ``sub.example.com`` → ``example.com``)
+    this is correct.  Domains under multi-label TLDs (e.g. ``co.uk``) may
+    need a different strategy — adjust if required.
+    """
+    parts = domain.rstrip(".").split(".")
+    return ".".join(parts[-2:])
+
+
+def _dns01_txt_value(key_authorization: bytes) -> str:
+    """Compute the DNS TXT record value for a DNS-01 challenge.
+
+    Per RFC 8555 §8.4: ``base64url(SHA-256(keyAuthorization))``.
+    """
+    digest = hashlib.sha256(key_authorization).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _der_to_pem_csr(csr_der: bytes) -> bytes:
+    """Convert a DER-encoded CSR to PEM format for gufo-acme."""
+    csr = load_der_x509_csr(csr_der)
+    return csr.public_bytes(Encoding.PEM)
+
+
+class JackdawAcmeClient(AcmeClient):
+    """gufo-acme client that fulfils DNS-01 challenges via a ``DNSProvider``.
+
+    Override ``fulfill_dns_01`` (and the cleanup hook ``clear_dns_01``) to
+    delegate record management to the configured provider.  A configurable
+    propagation delay is inserted after setting the record so that public
+    resolvers have time to reflect the change before LE queries them.
+    """
+
+    def __init__(
+        self,
+        directory_url: str,
+        *,
+        dns_provider: DNSProvider,
+        propagation_wait: int,
+        verify_ssl: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(directory_url, **kwargs)
+        self._dns = dns_provider
+        self._propagation_wait = propagation_wait
+        self._verify_ssl = verify_ssl
+
+    def _get_client(self, auth: Any = None) -> HttpClient:
+        return HttpClient(
+            headers={"User-Agent": self._user_agent.encode()},
+            auth=auth,
+            validate_cert=self._verify_ssl,
+        )
+
+    async def get_authorization_status(
+        self, auth: AcmeAuthorization
+    ) -> AcmeAuthorizationStatus:
+        # gufo-acme 0.6.0 crashes on challenge types that have no `token` field
+        # (e.g. Pebble's device-attest-01). Filter those out before constructing
+        # AcmeChallenge objects so gufo-acme only sees the standard challenge types.
+        resp = await self._post(auth.url, None)
+        data = json.loads(resp.content)
+        return AcmeAuthorizationStatus(
+            status=data["status"],
+            challenges=[
+                AcmeChallenge(type=d["type"], url=d["url"], token=d["token"])
+                for d in data["challenges"]
+                if "token" in d
+            ],
+        )
+
+    async def new_order(self, domain: str) -> AcmeOrder:  # type: ignore[override]
+        """Override to capture the order URL from the Location header.
+
+        gufo-acme's new_order() discards Location, but we need it as a fallback
+        for finalize_and_wait() when the CA omits Location there (Pebble does).
+        """
+        identifiers = self._domain_to_identifiers(domain)
+        self._check_bound()
+        d = await self._get_directory()
+        resp = await self._post(d.new_order, {"identifiers": identifiers})
+        loc = resp.headers.get("Location", None)
+        self._order_url: str | None = loc.decode() if loc is not None else None
+        data = json.loads(resp.content)
+        return AcmeOrder(
+            authorizations=[
+                AcmeAuthorization(domain=i["value"], url=a)
+                for i, a in zip(identifiers, data["authorizations"], strict=True)
+            ],
+            finalize=data["finalize"],
+        )
+
+    async def finalize_and_wait(self, order: AcmeOrder, *, csr: bytes) -> bytes:
+        """Override to handle CAs that omit Location from the finalize response.
+
+        RFC 8555 §7.4 says Location SHOULD be present, not MUST. Pebble omits
+        it from finalize but does include it in new_order, which we capture in
+        our new_order() override above.
+        """
+        resp = await self._post(
+            order.finalize, {"csr": encode_b64jose(self._pem_to_der(csr))}
+        )
+        self._get_order_status(resp)
+
+        location = resp.headers.get("Location", None)
+        if location is not None:
+            order_uri = location.decode()
+        elif getattr(self, "_order_url", None):
+            order_uri = self._order_url  # type: ignore[assignment]
+        else:
+            # Last resort: cert may already be in the finalize response body.
+            data = json.loads(resp.content)
+            if data.get("status") == "valid" and "certificate" in data:
+                cert_resp = await self._post(data["certificate"], None)
+                return cert_resp.content
+            raise AcmeCertificateError(
+                "Finalize response missing Location header and no order URL available"
+            )
+
+        # Poll until the CA marks the order valid.
+        await asyncio.sleep(1)
+        while True:
+            resp = await self._post(order_uri, None)
+            status = self._get_order_status(resp)
+            if status == "valid":
+                data = json.loads(resp.content)
+                cert_resp = await self._post(data["certificate"], None)
+                return cert_resp.content
+
+    async def fulfill_dns_01(self, domain: str, challenge: AcmeChallenge) -> bool:
+        """Set ``_acme-challenge.<domain>`` TXT record, then wait for propagation.
+
+        Args:
+            domain:    The domain being challenged (e.g. ``"host.example.com"``).
+            challenge: gufo-acme challenge object.
+
+        Returns:
+            ``True`` on success, ``False`` if the DNS call failed.
+        """
+        apex = _apex_domain(domain)
+        name = f"_acme-challenge.{domain}"
+        value = _dns01_txt_value(self.get_key_authorization(challenge))
+
+        try:
+            await self._dns.set_txt(apex, name, value)
+        except Exception:
+            log.exception("DNS-01 set_txt failed for domain %s", domain)
+            return False
+
+        if self._propagation_wait:
+            log.debug("Waiting %ds for DNS propagation…", self._propagation_wait)
+            await asyncio.sleep(self._propagation_wait)
+
+        return True
+
+    async def clear_dns_01(self, domain: str, challenge: AcmeChallenge) -> None:
+        """Remove ``_acme-challenge.<domain>`` TXT record after LE validation.
+
+        Failure is logged as a warning but does not propagate — a lingering
+        TXT record is harmless.
+        """
+        apex = _apex_domain(domain)
+        name = f"_acme-challenge.{domain}"
+
+        try:
+            await self._dns.delete_txt(apex, name)
+        except Exception:
+            log.warning("DNS-01 delete_txt failed for %s (non-fatal)", domain)
+
+
+def _load_or_create_account_key(key_path: Path) -> JWKEC:
+    """Return a josepy JWKEC wrapping a P-256 key, creating the file on first call.
+
+    The key file is stored as PEM-encoded PKCS8 with mode 0o600.
+    """
+    if key_path.exists():
+        raw = load_pem_private_key(key_path.read_bytes(), password=None)
+        return JWKEC(key=raw)
+
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    private_key = generate_private_key(SECP256R1())
+    pem = private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+    key_path.write_bytes(pem)
+    key_path.chmod(0o600)
+    log.info("Created new LE account key at %s", key_path)
+    return JWKEC(key=private_key)
+
+
+async def init_account(dns_provider: DNSProvider) -> JackdawAcmeClient:
+    """Initialise and return a ``JackdawAcmeClient`` with a registered LE account.
+
+    Loads the account key from ``settings.le_account_key_path`` (creating it
+    if absent) and registers the account with Let's Encrypt if not already
+    done.
+
+    Args:
+        dns_provider: The active DNS provider for challenge fulfilment.
+
+    Returns:
+        An initialised, ready-to-use ``JackdawAcmeClient``.
+    """
+    settings = get_settings()
+    key = _load_or_create_account_key(Path(settings.le_account_key_path))
+
+    client = JackdawAcmeClient(
+        settings.le_directory,
+        dns_provider=dns_provider,
+        propagation_wait=settings.dns_propagation_wait,
+        verify_ssl=settings.le_verify_ssl,
+        key=key,
+        alg=ES256,
+    )
+
+    # new_account is idempotent — safe to call even if already registered.
+    await client.new_account(settings.acme_email)
+    log.info("LE account registered/verified at %s", settings.le_directory)
+
+    return client
+
+
+async def order_cert(
+    client: JackdawAcmeClient,
+    domain: str,
+    csr_der: bytes,
+) -> str:
+    """Run the full ACME flow for *domain* using the supplied CSR.
+
+    gufo-acme handles: new-order → DNS-01 challenge → ``fulfill_dns_01``
+    (set TXT) → notify LE → wait for validation → ``clear_dns_01`` (delete
+    TXT) → finalize with CSR → fetch cert.
+
+    Args:
+        client:  Initialised ``JackdawAcmeClient``.
+        domain:  The domain to certify (must be in the CSR SAN).
+        csr_der: DER-encoded certificate signing request from the ACME client.
+
+    Returns:
+        PEM-encoded certificate chain (leaf + intermediates).
+    """
+    # gufo-acme sign() expects a PEM-format CSR; convert from DER.
+    csr_pem = _der_to_pem_csr(csr_der)
+    result = await client.sign(domain, csr_pem)
+    return result.decode()
