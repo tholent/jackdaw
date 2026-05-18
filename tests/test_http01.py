@@ -21,6 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jackdaw.db.models import Account, Authorization, Order
 from jackdaw.services.http01 import (
     Http01ValidationError,
+    _attempt_validation,
+    _fetch_and_compare,
+    _is_blocked,
     _resolve_and_check,
     key_authorization,
     validate_http01,
@@ -569,6 +572,132 @@ async def test_process_finalize_le_failure_sets_invalid() -> None:
         await db.execute(delete(Order).where(Order.id == ord_id))
         await db.execute(delete(Account).where(Account.id == acct_id))
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# _is_blocked — unparsable IP address (lines 68-69)
+# ---------------------------------------------------------------------------
+
+
+def test_is_blocked_unparsable_address_returns_true() -> None:
+    """_is_blocked must return True for strings that are not valid IP addresses."""
+    assert _is_blocked("not-an-ip-address") is True
+
+
+# ---------------------------------------------------------------------------
+# _resolve_and_check — empty DNS results (line 88)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_and_check_empty_results_raises() -> None:
+    """_resolve_and_check must raise Http01ValidationError when getaddrinfo returns []."""
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = []
+        with pytest.raises(Http01ValidationError, match="No DNS records"):
+            _resolve_and_check("empty.test")
+
+
+# ---------------------------------------------------------------------------
+# _resolve_and_check — multiple IPs (branch 95->91)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_and_check_multiple_ips_returns_first() -> None:
+    """With multiple non-blocked records, the first IP is selected (exercises 95->91 branch)."""
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [
+            (2, 1, 6, "", ("192.168.1.10", 0)),
+            (2, 1, 6, "", ("192.168.1.11", 0)),
+        ]
+        ip = _resolve_and_check("multi.internal")
+    assert ip == "192.168.1.10"
+
+
+# ---------------------------------------------------------------------------
+# _attempt_validation — production path without client_factory (lines 196-214)
+# ---------------------------------------------------------------------------
+
+
+async def test_attempt_validation_known_dns_error_propagates() -> None:
+    """Http01ValidationError raised by DNS resolution must propagate unchanged (line 199)."""
+    with patch(
+        "jackdaw.services.http01.asyncio.to_thread",
+        new=AsyncMock(side_effect=Http01ValidationError("blocked address")),
+    ):
+        with pytest.raises(Http01ValidationError, match="blocked address"):
+            await _attempt_validation(
+                "blocked.test", 80, "/.well-known/acme-challenge/tok", "expected", 5, None
+            )
+
+
+async def test_attempt_validation_unexpected_dns_exception_wraps() -> None:
+    """An unexpected (non-Http01ValidationError) exception from asyncio.to_thread is wrapped."""
+    with patch(
+        "jackdaw.services.http01.asyncio.to_thread",
+        new=AsyncMock(side_effect=RuntimeError("system error")),
+    ):
+        with pytest.raises(Http01ValidationError, match="Unexpected error"):
+            await _attempt_validation(
+                "example.com", 80, "/.well-known/acme-challenge/tok", "expected", 5, None
+            )
+
+
+async def test_attempt_validation_production_ipv4_path() -> None:
+    """Production path (no client_factory): resolves IPv4, creates client, calls fetch."""
+    with patch(
+        "jackdaw.services.http01.asyncio.to_thread",
+        new=AsyncMock(return_value="192.168.1.1"),
+    ):
+        with patch(
+            "jackdaw.services.http01._fetch_and_compare",
+            new=AsyncMock(return_value=None),
+        ) as mock_fetch:
+            await _attempt_validation(
+                "service.internal", 80, "/.well-known/acme-challenge/tok", "expected", 5, None
+            )
+    mock_fetch.assert_awaited_once()
+
+
+async def test_attempt_validation_production_ipv6_path() -> None:
+    """IPv6 resolved IP must be wrapped in brackets in the target URL."""
+    with patch(
+        "jackdaw.services.http01.asyncio.to_thread",
+        new=AsyncMock(return_value="2001:db8::1"),
+    ):
+        with patch(
+            "jackdaw.services.http01._fetch_and_compare",
+            new=AsyncMock(return_value=None),
+        ) as mock_fetch:
+            await _attempt_validation(
+                "ipv6.example.com", 80, "/.well-known/acme-challenge/tok", "expected", 5, None
+            )
+    target_url = mock_fetch.call_args[0][1]
+    assert "[2001:db8::1]" in target_url
+
+
+# ---------------------------------------------------------------------------
+# _fetch_and_compare — httpx.RequestError (lines 231-232)
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_and_compare_request_error_raises() -> None:
+    """httpx.RequestError (not a timeout) must be wrapped as Http01ValidationError."""
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+
+    with pytest.raises(Http01ValidationError, match="request failed"):
+        await _fetch_and_compare(
+            mock_client,
+            "http://192.168.1.1/.well-known/acme-challenge/tok",
+            "example.com",
+            "expected",
+            5,
+        )
+
+
+# ---------------------------------------------------------------------------
+# worker.process_finalize — success
+# ---------------------------------------------------------------------------
 
 
 async def test_process_finalize_success_stores_cert() -> None:

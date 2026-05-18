@@ -4,18 +4,30 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 
+import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from jackdaw.services.jws import _decode_jws_payload, _verify_jws_signature
 from jackdaw.services.nonce import generate_nonce
 from tests.conftest import build_jws, jwk_for_key, make_ec_key
 
 _CT = {"Content-Type": "application/jose+json"}
 
+_NEW_ACCOUNT = "https://jackdaw.test/acme/new-account"
+_REVOKE = "https://jackdaw.test/acme/revoke-cert"
+
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _make_protected(**fields: object) -> str:
+    """Return a base64url-encoded JWS protected header with exactly the given fields."""
+    return _b64url(json.dumps(fields).encode())
 
 
 async def _create_account(client: AsyncClient, db: AsyncSession) -> tuple:
@@ -293,3 +305,167 @@ async def test_deactivated_account_rejected(
     )
     resp = await test_client.post("/acme/new-order", json=body, headers=_CT)
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Body not valid JSON / not a dict (lines 149-151)
+# ---------------------------------------------------------------------------
+
+
+async def test_non_json_body_returns_400(test_client: AsyncClient) -> None:
+    resp = await test_client.post("/acme/new-account", content=b"not json", headers=_CT)
+    assert resp.status_code == 400
+
+
+async def test_json_array_body_returns_400(test_client: AsyncClient) -> None:
+    """A valid JSON value that is not a dict must trigger the isinstance check (line 149)."""
+    resp = await test_client.post("/acme/new-account", content=b"[1,2,3]", headers=_CT)
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Missing required fields (line 158)
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_signature_returns_400(test_client: AsyncClient) -> None:
+    resp = await test_client.post(
+        "/acme/new-account",
+        json={"protected": "aaa", "payload": ""},
+        headers=_CT,
+    )
+    assert resp.status_code == 400
+
+
+async def test_missing_protected_returns_400(test_client: AsyncClient) -> None:
+    resp = await test_client.post(
+        "/acme/new-account",
+        json={"payload": "", "signature": "aaa"},
+        headers=_CT,
+    )
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Invalid protected header encoding (lines 162-163)
+# ---------------------------------------------------------------------------
+
+
+async def test_invalid_protected_encoding_returns_400(test_client: AsyncClient) -> None:
+    resp = await test_client.post(
+        "/acme/new-account",
+        json={"protected": "!!!not-base64!!!", "payload": "", "signature": "aaa"},
+        headers=_CT,
+    )
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Unsupported algorithm (line 167)
+# ---------------------------------------------------------------------------
+
+
+async def test_unsupported_algorithm_returns_400(test_client: AsyncClient) -> None:
+    protected_b64 = _make_protected(alg="HS256", url=_NEW_ACCOUNT, jwk={})
+    resp = await test_client.post(
+        "/acme/new-account",
+        json={"protected": protected_b64, "payload": "", "signature": "aaa"},
+        headers=_CT,
+    )
+    assert resp.status_code == 400
+    assert "HS256" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# kid — empty account ID (line 84)
+# ---------------------------------------------------------------------------
+
+
+async def test_kid_empty_account_id_returns_400(test_client: AsyncClient) -> None:
+    """kid equal to the bare account-URL prefix (trailing slash, no UUID) must return 400."""
+    protected_b64 = _make_protected(
+        alg="ES256",
+        url=_REVOKE,
+        kid="https://jackdaw.test/acme/account/",
+    )
+    resp = await test_client.post(
+        "/acme/revoke-cert",
+        json={"protected": protected_b64, "payload": "", "signature": "aaa"},
+        headers=_CT,
+    )
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# kid — account not found (line 89)
+# ---------------------------------------------------------------------------
+
+
+async def test_kid_unknown_account_returns_401(test_client: AsyncClient) -> None:
+    """A valid-format kid pointing to a non-existent account UUID must return 401."""
+    kid = f"https://jackdaw.test/acme/account/{uuid.uuid4()}"
+    protected_b64 = _make_protected(alg="ES256", url=_REVOKE, kid=kid)
+    resp = await test_client.post(
+        "/acme/revoke-cert",
+        json={"protected": protected_b64, "payload": "", "signature": "aaa"},
+        headers=_CT,
+    )
+    assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Neither jwk nor kid (line 94)
+# ---------------------------------------------------------------------------
+
+
+async def test_neither_jwk_nor_kid_returns_400(test_client: AsyncClient) -> None:
+    """A protected header with neither 'jwk' nor 'kid' must return 400."""
+    protected_b64 = _make_protected(alg="ES256", url=_NEW_ACCOUNT)
+    resp = await test_client.post(
+        "/acme/new-account",
+        json={"protected": protected_b64, "payload": "", "signature": "aaa"},
+        headers=_CT,
+    )
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# _verify_jws_signature — exception path (lines 102-104)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_jws_signature_crypto_exception_raises_400() -> None:
+    """When the crypto layer raises (not returns False), the except branch must catch it.
+
+    josepy returns False for a bad signature — it doesn't raise.  To exercise
+    lines 102-104 we patch ALG_MAP so that verify() raises RuntimeError, which
+    is caught by 'except Exception' and turned into HTTP 400.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from josepy.jwk import JWK
+
+    jwk_data = jwk_for_key(make_ec_key())
+    jwk = JWK.from_json(jwk_data)
+
+    exploding_alg = MagicMock()
+    exploding_alg.verify.side_effect = RuntimeError("crypto layer exploded")
+
+    with patch.dict("jackdaw.services.jws.ALG_MAP", {"ES256": exploding_alg}):
+        with pytest.raises(HTTPException) as exc_info:
+            _verify_jws_signature("ES256", jwk, b"signing.input", b"sig")
+    assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# _decode_jws_payload — invalid payload encoding (lines 115-116)
+# ---------------------------------------------------------------------------
+
+
+def test_decode_jws_payload_non_json_raises_400() -> None:
+    """base64url payload that decodes to non-JSON must raise HTTP 400."""
+    bad_b64 = _b64url(b"not-json-{{{")
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_jws_payload(bad_b64)
+    assert exc_info.value.status_code == 400
+    assert "Invalid JWS payload" in exc_info.value.detail
