@@ -24,7 +24,7 @@ router = APIRouter()
 _DB = Annotated[AsyncSession, Depends(get_db)]
 
 
-async def _verify_inner_jws(
+def _verify_inner_jws(
     inner: dict[str, Any],
     *,
     expected_account_url: str,
@@ -138,7 +138,7 @@ async def key_change(request: Request, db: _DB) -> JSONResponse:
     account_url = f"{settings.relay_base_url}/acme/account/{account_id}"
     key_change_url = str(request.url)
 
-    new_jwk_data = await _verify_inner_jws(
+    new_jwk_data = _verify_inner_jws(
         inner_jws_dict,
         expected_account_url=account_url,
         old_public_key_json=account.public_key,
