@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw._util import b64url_decode
+from jackdaw.config import get_settings
 from jackdaw.db.models import Account
 from jackdaw.services.nonce import consume_nonce
 
@@ -33,6 +34,17 @@ _ALG_MAP = {
     "ES384": ES384,
     "ES512": ES512,
 }
+
+# Prefix all account kid URLs must start with (populated on first use).
+_ACCOUNT_URL_PREFIX: str | None = None
+
+
+def _account_url_prefix() -> str:
+    """Return the expected kid URL prefix, e.g. 'https://relay.example.com/acme/account/'."""
+    global _ACCOUNT_URL_PREFIX
+    if _ACCOUNT_URL_PREFIX is None:
+        _ACCOUNT_URL_PREFIX = f"{get_settings().relay_base_url}/acme/account/"
+    return _ACCOUNT_URL_PREFIX
 
 
 async def verify_jws(
@@ -54,8 +66,8 @@ async def verify_jws(
         ``(payload_dict, account_id)`` tuple.
 
     Raises:
-        HTTPException(400): Bad nonce, URL mismatch, invalid signature, etc.
-        HTTPException(401): Unknown account when ``kid`` is present.
+        HTTPException(400): Bad nonce, URL mismatch, invalid signature, malformed kid, etc.
+        HTTPException(401): Unknown or deactivated account when ``kid`` is present.
         HTTPException(415): Wrong ``Content-Type``.
     """
     content_type = request.headers.get("content-type", "")
@@ -63,7 +75,9 @@ async def verify_jws(
         raise HTTPException(status_code=415, detail="Content-Type must be application/jose+json")
 
     try:
-        body: dict[str, str] = await request.json()
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("body must be a JSON object")
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Request body is not valid JSON") from exc
 
@@ -93,22 +107,45 @@ async def verify_jws(
     if url_val != str(request.url):
         raise HTTPException(status_code=400, detail="JWS url claim does not match request URL")
 
-    # Resolve the public key and derive account_id.
-    account_id = ""
+    # RFC 8555 §6.2: exactly one of 'jwk' or 'kid' must be present, not both.
     jwk_data: dict[str, Any] | None = protected.get("jwk")
     kid: str | None = protected.get("kid")
+
+    if jwk_data is not None and kid is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="JWS protected header must contain 'jwk' or 'kid', not both",
+        )
+
+    # Resolve the public key and derive account_id.
+    account_id = ""
 
     if jwk_data is not None:
         # newAccount: key is embedded; no account row exists yet.
         jwk = cast(JWK, JWK.from_json(jwk_data))
+
     elif kid is not None:
-        # All post-account requests: kid is the full account URL.
-        account_id = kid.rstrip("/").rsplit("/", 1)[-1]
+        # All post-account requests: kid must be the canonical account URL issued
+        # by this relay.  Extract the UUID from the known prefix to avoid treating
+        # arbitrary attacker-controlled URLs as valid account identifiers.
+        prefix = _account_url_prefix()
+        if not kid.startswith(prefix):
+            raise HTTPException(
+                status_code=400,
+                detail="JWS kid is not a valid account URL for this server",
+            )
+        account_id = kid[len(prefix):].rstrip("/")
+        if not account_id:
+            raise HTTPException(status_code=400, detail="JWS kid is missing the account ID")
+
         result = await db.execute(select(Account).where(Account.id == account_id))
         account = result.scalar_one_or_none()
         if account is None:
             raise HTTPException(status_code=401, detail="Account not found")
+        if account.status != "valid":
+            raise HTTPException(status_code=401, detail="Account is not active")
         jwk = cast(JWK, JWK.from_json(json.loads(account.public_key)))
+
     else:
         raise HTTPException(
             status_code=400, detail="JWS protected header must contain 'jwk' or 'kid'"
