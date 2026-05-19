@@ -1,0 +1,33 @@
+name: Pytest
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: pytest with coverage
+        run: uv run pytest -v --cov --cov-report=xml --cov-report=term-missing
+        env:
+          PORKBUN_API_KEY: pk1_test
+          PORKBUN_SECRET_API_KEY: sk1_test
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
