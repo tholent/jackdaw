@@ -50,11 +50,21 @@ async def _prune_loop() -> None:
 
 
 def _write_relay_cert(cert_path: Path, key_path: Path, pem_chain: str, key_pem: str) -> None:
-    """Write certificate and key to disk, then signal nginx — runs in a thread."""
+    """Write certificate and key to disk, then signal nginx — runs in a thread.
+
+    Both files are written to temp paths and atomically renamed so a crash
+    mid-write can never leave nginx pairing a new cert with an old key (or a
+    truncated file), which would break the TLS handshake.
+    """
     cert_path.parent.mkdir(parents=True, exist_ok=True)
-    cert_path.write_text(pem_chain)
-    key_path.write_text(key_pem)
-    key_path.chmod(0o600)
+    cert_tmp = cert_path.with_name(cert_path.name + ".tmp")
+    key_tmp = key_path.with_name(key_path.name + ".tmp")
+    cert_tmp.write_text(pem_chain)
+    key_tmp.write_text(key_pem)
+    key_tmp.chmod(0o600)
+    # Both temp files are fully written; the renames themselves are atomic.
+    os.replace(key_tmp, key_path)
+    os.replace(cert_tmp, cert_path)
     log.info("Relay TLS cert written to %s", cert_path)
 
     nginx_pid_file = Path("/var/run/nginx.pid")
