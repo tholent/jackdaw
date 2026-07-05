@@ -46,6 +46,11 @@ from jackdaw.dns.base import DNSProvider
 
 log = logging.getLogger(__name__)
 
+# Bound the finalize polling loop so a stuck/never-valid order cannot loop
+# forever holding a task reference and an open connection to the CA.
+_FINALIZE_POLL_INTERVAL = 2.0  # seconds between order-status polls
+_FINALIZE_POLL_ATTEMPTS = 60  # ~2 minutes total before giving up
+
 
 def _apex_domain(domain: str) -> str:
     """Return the last two labels of *domain* as the apex (registrable) domain.
@@ -95,6 +100,10 @@ class JackdawAcmeClient(AcmeClient):
         self._dns = dns_provider
         self._propagation_wait = propagation_wait
         self._verify_ssl = verify_ssl
+        # Map of finalize-URL → order-URL captured in new_order().  Keyed per
+        # order (finalize URLs are unique) so concurrent orders on this shared
+        # client instance never clobber each other's order URL.
+        self._order_urls: dict[str, str] = {}
 
     def _get_client(self, auth: Any = None) -> HttpClient:
         return HttpClient(
@@ -128,9 +137,10 @@ class JackdawAcmeClient(AcmeClient):
         self._check_bound()
         d = await self._get_directory()
         resp = await self._post(d.new_order, {"identifiers": identifiers})
-        loc = resp.headers.get("Location", None)
-        self._order_url: str | None = loc.decode() if loc is not None else None
         data = json.loads(resp.content)
+        loc = resp.headers.get("Location", None)
+        if loc is not None:
+            self._order_urls[data["finalize"]] = loc.decode()
         return AcmeOrder(
             authorizations=[
                 AcmeAuthorization(domain=i["value"], url=a)
@@ -150,10 +160,12 @@ class JackdawAcmeClient(AcmeClient):
         self._get_order_status(resp)
 
         location = resp.headers.get("Location", None)
+        # Pop our captured URL for this order regardless, so the map never grows.
+        stored_order_url = self._order_urls.pop(order.finalize, None)
         if location is not None:
             order_uri = location.decode()
-        elif getattr(self, "_order_url", None):
-            order_uri = self._order_url  # type: ignore[assignment]
+        elif stored_order_url is not None:
+            order_uri = stored_order_url
         else:
             # Last resort: cert may already be in the finalize response body.
             data = json.loads(resp.content)
@@ -164,15 +176,23 @@ class JackdawAcmeClient(AcmeClient):
                 "Finalize response missing Location header and no order URL available"
             )
 
-        # Poll until the CA marks the order valid.
+        # Poll until the CA marks the order valid, bounded so a stuck order
+        # cannot loop forever.
         await asyncio.sleep(1)
-        while True:
+        for _ in range(_FINALIZE_POLL_ATTEMPTS):
             resp = await self._post(order_uri, None)
             status = self._get_order_status(resp)
             if status == "valid":
                 data = json.loads(resp.content)
                 cert_resp = await self._post(data["certificate"], None)
                 return cert_resp.content
+            if status == "invalid":
+                raise AcmeCertificateError(f"Order {order_uri} became invalid during finalization")
+            await asyncio.sleep(_FINALIZE_POLL_INTERVAL)
+        raise AcmeCertificateError(
+            f"Order {order_uri} did not become valid within "
+            f"{_FINALIZE_POLL_ATTEMPTS * _FINALIZE_POLL_INTERVAL:.0f}s"
+        )
 
     async def fulfill_dns_01(self, domain: str, challenge: AcmeChallenge) -> bool:
         """Set ``_acme-challenge.<domain>`` TXT record, then wait for propagation.

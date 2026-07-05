@@ -153,3 +153,55 @@ async def test_fulfill_dns_01_returns_false_on_dns_error(tmp_path: Path) -> None
 
     assert result is False
     failing_dns.set_txt.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# JackdawAcmeClient.new_order — per-order URL capture (concurrency safety)
+# ---------------------------------------------------------------------------
+
+
+async def test_new_order_keys_order_url_per_finalize(tmp_path: Path) -> None:
+    """Each order's URL is stored under its own finalize key so concurrent
+    orders on the shared client never clobber each other's order URL."""
+    import json as _json
+
+    from josepy.jwa import ES256
+
+    key_path = tmp_path / "account.key"
+    acme_key = _load_or_create_account_key(key_path)
+
+    client = JackdawAcmeClient(
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+        dns_provider=MagicMock(),
+        propagation_wait=0,
+        verify_ssl=False,
+        key=acme_key,
+        alg=ES256,
+    )
+    client._check_bound = MagicMock()  # type: ignore[method-assign]
+    directory = MagicMock()
+    directory.new_order = "https://ca/new-order"
+    client._get_directory = AsyncMock(return_value=directory)  # type: ignore[method-assign]
+    client._domain_to_identifiers = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda d: [{"type": "dns", "value": d}]
+    )
+
+    def _resp(order_url: str, finalize: str, authz_url: str) -> MagicMock:
+        resp = MagicMock()
+        resp.headers = {"Location": order_url.encode()}
+        resp.content = _json.dumps({"authorizations": [authz_url], "finalize": finalize}).encode()
+        return resp
+
+    client._post = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            _resp("https://ca/order/1", "https://ca/order/1/finalize", "https://ca/authz/1"),
+            _resp("https://ca/order/2", "https://ca/order/2/finalize", "https://ca/authz/2"),
+        ]
+    )
+
+    order1 = await client.new_order("a.example.com")
+    order2 = await client.new_order("b.example.com")
+
+    assert order1.finalize != order2.finalize
+    assert client._order_urls[order1.finalize] == "https://ca/order/1"
+    assert client._order_urls[order2.finalize] == "https://ca/order/2"
