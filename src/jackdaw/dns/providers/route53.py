@@ -6,6 +6,7 @@ import logging
 import urllib.parse
 from datetime import UTC, datetime
 from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 
 import httpx
 from pydantic_settings import BaseSettings
@@ -130,14 +131,16 @@ class Route53DNSProvider(DNSProvider):
         return id_el.text.rsplit("/", 1)[-1]
 
     def _change_xml(self, action: str, name: str, values: list[str]) -> str:
-        rr = "".join(f"<ResourceRecord><Value>{v}</Value></ResourceRecord>" for v in values)
+        # Escape all user-influenced values (record name and TXT contents) so
+        # XML metacharacters cannot break out of or manipulate the request body.
+        rr = "".join(f"<ResourceRecord><Value>{escape(v)}</Value></ResourceRecord>" for v in values)
         return (
             f'<?xml version="1.0" encoding="UTF-8"?>'
             f'<ChangeResourceRecordSetsRequest xmlns="{_NS}">'
             f"<ChangeBatch><Changes><Change>"
             f"<Action>{action}</Action>"
             f"<ResourceRecordSet>"
-            f"<Name>{name}.</Name>"
+            f"<Name>{escape(name)}.</Name>"
             f"<Type>TXT</Type><TTL>120</TTL>"
             f"<ResourceRecords>{rr}</ResourceRecords>"
             f"</ResourceRecordSet>"

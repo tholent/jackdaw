@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -232,6 +233,21 @@ async def test_route53_set_txt_creates_record(monkeypatch: pytest.MonkeyPatch) -
     assert '"newtoken"' in body
 
 
+def test_route53_change_xml_escapes_special_chars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """XML metacharacters in the record name/value must be escaped, not injected."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testsecret")
+
+    provider = Route53DNSProvider()
+    xml = provider._change_xml("CREATE", "_acme-challenge.a&b<c>", ['"x&y<z>"'])
+
+    assert "_acme-challenge.a&amp;b&lt;c&gt;" in xml
+    assert '"x&amp;y&lt;z&gt;"' in xml
+    # No raw, unescaped user metacharacters leaked into the body.
+    assert "a&b" not in xml
+    assert "x&y" not in xml
+
+
 @respx.mock
 async def test_route53_delete_txt_removes_record(monkeypatch: pytest.MonkeyPatch) -> None:
     """delete_txt should fetch existing values then POST a DELETE change."""
@@ -334,3 +350,45 @@ async def test_namecheap_delete_txt_removes_record(monkeypatch: pytest.MonkeyPat
     assert "tok123" not in body
     # A record must be preserved
     assert "1.2.3.4" in body
+
+
+async def test_namecheap_set_txt_serializes_concurrent_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-apex lock must prevent lost updates on concurrent same-domain writes.
+
+    Namecheap's setHosts replaces the entire host list, so two overlapping
+    read-modify-write cycles would drop one record.  The lock serializes them.
+    """
+    _nc_env(monkeypatch)
+    provider = NamecheapDNSProvider()
+
+    state: list[dict[str, str]] = []
+    active = 0
+    max_concurrent = 0
+
+    async def fake_get(client: object, sld: str, tld: str) -> list[dict[str, str]]:
+        nonlocal active, max_concurrent
+        active += 1
+        max_concurrent = max(max_concurrent, active)
+        await asyncio.sleep(0)  # yield: an unlocked impl would let the peer read stale state
+        return list(state)
+
+    async def fake_set(client: object, sld: str, tld: str, hosts: list[dict[str, str]]) -> None:
+        nonlocal active
+        await asyncio.sleep(0)
+        state[:] = hosts
+        active -= 1
+
+    monkeypatch.setattr(provider, "_get_hosts", fake_get)
+    monkeypatch.setattr(provider, "_set_hosts", fake_set)
+
+    await asyncio.gather(
+        provider.set_txt("example.com", "_acme-challenge.a.example.com", "tokA"),
+        provider.set_txt("example.com", "_acme-challenge.b.example.com", "tokB"),
+    )
+
+    # Both records survived — neither write was lost.
+    assert {h["address"] for h in state} == {"tokA", "tokB"}
+    # Read-modify-write cycles never overlapped.
+    assert max_concurrent == 1

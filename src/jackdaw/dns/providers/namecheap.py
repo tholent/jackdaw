@@ -1,5 +1,6 @@
 """Namecheap DNS provider."""
 
+import asyncio
 import logging
 from xml.etree import ElementTree
 
@@ -44,6 +45,14 @@ class NamecheapDNSProvider(DNSProvider):
         self._api_key = s.api_key
         self._username = s.username or s.api_user
         self._client_ip = s.client_ip
+        # setHosts replaces the entire host list, so read-modify-write cycles on
+        # the same apex domain must be serialized to avoid lost updates when two
+        # challenges for different subdomains run concurrently.  (Single-process
+        # only; cross-process concurrency is out of scope for this deployment.)
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, domain: str) -> asyncio.Lock:
+        return self._locks.setdefault(domain, asyncio.Lock())
 
     def _base_params(self, command: str, sld: str, tld: str) -> dict[str, str]:
         return {
@@ -111,7 +120,7 @@ class NamecheapDNSProvider(DNSProvider):
         """
         sld, tld = self._split_domain(domain)
         rel_name = name.removesuffix(f".{domain}")
-        async with httpx.AsyncClient() as client:
+        async with self._lock_for(domain), httpx.AsyncClient() as client:
             hosts = await self._get_hosts(client, sld, tld)
             hosts.append(
                 {"name": rel_name, "type": "TXT", "address": value, "mx_pref": "10", "ttl": "120"}
@@ -128,7 +137,7 @@ class NamecheapDNSProvider(DNSProvider):
         """
         sld, tld = self._split_domain(domain)
         rel_name = name.removesuffix(f".{domain}")
-        async with httpx.AsyncClient() as client:
+        async with self._lock_for(domain), httpx.AsyncClient() as client:
             hosts = await self._get_hosts(client, sld, tld)
             before = len(hosts)
             hosts = [h for h in hosts if not (h["type"] == "TXT" and h["name"] == rel_name)]
