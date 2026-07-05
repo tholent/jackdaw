@@ -171,7 +171,7 @@ complete reference.
 |---|---|---|---|
 | `RELAY_DOMAIN` | Yes | — | Public hostname of this relay |
 | `ACME_EMAIL` | Yes | — | Let's Encrypt account contact email |
-| `DNS_PROVIDER` | Yes | — | `porkbun` or `cloudflare` |
+| `DNS_PROVIDER` | Yes | — | `porkbun`, `cloudflare`, `route53`, `namecheap`, or `null` |
 | `PORKBUN_API_KEY` | Porkbun | — | Porkbun API key |
 | `PORKBUN_SECRET_API_KEY` | Porkbun | — | Porkbun secret API key |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare | — | Cloudflare API token |
@@ -183,6 +183,14 @@ complete reference.
 | `CHALLENGE_TIMEOUT` | No | `5` | Seconds before an HTTP-01 fetch attempt times out |
 | `CHALLENGE_RETRIES` | No | `3` | Number of fetch attempts before failing the challenge |
 | `CHALLENGE_RETRY_DELAY` | No | `2` | Seconds between retry attempts |
+| `DATABASE_URL` | No | `sqlite+aiosqlite:////data/relay.db` | SQLite path; must point at a persistent volume. Override when running outside Docker |
+| `DNS_ZONE_OVERRIDES` | No | _(none)_ | Comma-separated apex zones for multi-label TLDs (e.g. `example.co.uk`) |
+| `ORDER_RATE_LIMIT` | No | `0` | Max orders per account within the window; `0` disables |
+| `ORDER_RATE_WINDOW` | No | `604800` | Rate-limit window in seconds (default 7 days) |
+
+Orders that are not finalized within **24 hours** expire and can no longer be
+completed (the client must submit a fresh order). This expiry is currently
+fixed. See `.env.example` for the complete list of settings.
 
 ### Restricting which domains can be issued
 
@@ -221,6 +229,14 @@ implementation — certbot's systemd timer, Caddy's built-in renewal, etc.
 Jackdaw behaves identically to any other ACME server from the client's
 perspective.
 
+## Health checks
+
+The relay exposes an unauthenticated liveness endpoint at **`GET /healthz`**
+that returns `200 OK` when the app is up. The bundled `docker-compose.yml`
+healthcheck uses it, and it's the endpoint to point external load balancers or
+uptime monitors at. It performs no dependency checks — it only confirms the
+process is serving requests.
+
 ## DNS providers
 
 | Provider | `DNS_PROVIDER` value | Status |
@@ -229,6 +245,7 @@ perspective.
 | [Cloudflare](https://cloudflare.com) | `cloudflare` | Supported |
 | [Amazon Route 53](https://aws.amazon.com/route53/) | `route53` | Supported |
 | [Namecheap](https://www.namecheap.com) | `namecheap` | Supported |
+| _(none)_ | `null` | No-op provider for testing; skips DNS validation entirely |
 
 ### Adding a provider
 
