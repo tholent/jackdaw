@@ -66,7 +66,7 @@ async def acknowledge_challenge(authz_id: str, request: Request, db: _DB) -> JSO
     settings = get_settings()
     base = settings.relay_base_url
     body = ChallengeObject(
-        type="dns-01",
+        type="http-01",
         url=f"{base}/acme/challenge/{authz_id}",
         status="processing",
         token=authz.challenge_token or "",

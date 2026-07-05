@@ -240,7 +240,9 @@ async def test_full_order_flow(pebble_client: AsyncClient) -> None:
     )
     assert authz_resp.status_code == 200
     authz_data = authz_resp.json()
-    challenge = next(c for c in authz_data["challenges"] if c["type"] == "dns-01")
+    # Jackdaw validates HTTP-01 from the client, so it must advertise http-01.
+    assert not any(c["type"] == "dns-01" for c in authz_data["challenges"])
+    challenge = next(c for c in authz_data["challenges"] if c["type"] == "http-01")
     challenge_path = challenge["url"].replace("https://jackdaw.test", "")
 
     # Step 6: POST /acme/challenge/{id}

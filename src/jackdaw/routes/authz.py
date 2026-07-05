@@ -35,7 +35,7 @@ async def get_authz(authz_id: str, request: Request, db: _DB) -> JSONResponse:
         identifier=Identifier(type="dns", value=authz.identifier),
         challenges=[
             ChallengeObject(
-                type="dns-01",
+                type="http-01",
                 url=f"{base}/acme/challenge/{authz_id}",
                 status=authz.status,
                 token=authz.challenge_token or "",
