@@ -16,7 +16,8 @@
       "extensions": [
         "anthropic.claude-code",
         "ms-python.python",
-        "esbenp.prettier-vscode"
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-containers"
       ],
       "settings": {
         "telemetry.telemetryLevel": "off",
