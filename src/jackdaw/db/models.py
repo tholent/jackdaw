@@ -31,7 +31,8 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[str] = mapped_column(primary_key=True)
-    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"))
+    # Indexed: filtered by the per-account order rate-limit count.
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), index=True)
     # pending / ready / processing / valid / invalid
     status: Mapped[str] = mapped_column(default="pending")
     # JSON array of {type, value} identifier objects.

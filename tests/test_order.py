@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -18,7 +20,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw.db.models import Authorization, Order
-from jackdaw.routes.order import _check_domain_policy, _validate_identifiers
+from jackdaw.routes.order import (
+    _check_domain_policy,
+    _check_order_rate_limit,
+    _validate_identifiers,
+)
 from jackdaw.schemas.acme import Identifier
 from jackdaw.services.nonce import generate_nonce
 from tests.conftest import build_jws, jwk_for_key, make_ec_key
@@ -124,6 +130,52 @@ def test_validate_identifiers_rejects_blank_value() -> None:
     with pytest.raises(HTTPException) as exc_info:
         _validate_identifiers([Identifier(type="dns", value="   ")])
     assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# _check_order_rate_limit unit tests
+# ---------------------------------------------------------------------------
+
+
+def _order(account_id: str, created_at: datetime) -> Order:
+    return Order(
+        id=str(uuid.uuid4()),
+        account_id=account_id,
+        status="pending",
+        identifiers="[]",
+        created_at=created_at,
+    )
+
+
+async def test_rate_limit_disabled_by_default(db_session: AsyncSession) -> None:
+    db_session.add_all([_order("acct", datetime.now(UTC)) for _ in range(5)])
+    await db_session.commit()
+    with patch("jackdaw.routes.order.get_settings") as ms:
+        ms.return_value.order_rate_limit = 0
+        await _check_order_rate_limit(db_session, "acct")  # no raise
+
+
+async def test_rate_limit_blocks_over_cap(db_session: AsyncSession) -> None:
+    now = datetime.now(UTC)
+    db_session.add_all([_order("acct", now) for _ in range(2)])
+    await db_session.commit()
+    with patch("jackdaw.routes.order.get_settings") as ms:
+        ms.return_value.order_rate_limit = 2
+        ms.return_value.order_rate_window = 604800
+        with pytest.raises(HTTPException) as exc_info:
+            await _check_order_rate_limit(db_session, "acct")
+    assert exc_info.value.status_code == 429
+
+
+async def test_rate_limit_ignores_old_and_other_accounts(db_session: AsyncSession) -> None:
+    now = datetime.now(UTC)
+    db_session.add(_order("other", now))  # different account
+    db_session.add(_order("acct", now - timedelta(days=8)))  # outside the 7-day window
+    await db_session.commit()
+    with patch("jackdaw.routes.order.get_settings") as ms:
+        ms.return_value.order_rate_limit = 1
+        ms.return_value.order_rate_window = 604800
+        await _check_order_rate_limit(db_session, "acct")  # no raise: nothing recent for acct
 
 
 # ---------------------------------------------------------------------------

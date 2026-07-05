@@ -52,15 +52,23 @@ _FINALIZE_POLL_INTERVAL = 2.0  # seconds between order-status polls
 _FINALIZE_POLL_ATTEMPTS = 60  # ~2 minutes total before giving up
 
 
-def _apex_domain(domain: str) -> str:
-    """Return the last two labels of *domain* as the apex (registrable) domain.
+def _apex_domain(domain: str, overrides: list[str] | None = None) -> str:
+    """Return the apex (registrable) domain of *domain*.
 
-    For most common use-cases (e.g. ``sub.example.com`` → ``example.com``)
-    this is correct.  Domains under multi-label TLDs (e.g. ``co.uk``) may
-    need a different strategy — adjust if required.
+    If *overrides* contains a zone that *domain* falls under, the longest such
+    zone is returned — this is the escape hatch for multi-label public suffixes
+    (e.g. configuring ``example.co.uk`` so ``a.example.co.uk`` resolves
+    correctly instead of the wrong ``co.uk``).
+
+    Otherwise falls back to the last two labels, which is correct for the common
+    case (``sub.example.com`` → ``example.com``).
     """
-    parts = domain.rstrip(".").split(".")
-    return ".".join(parts[-2:])
+    d = domain.rstrip(".")
+    if overrides:
+        matches = [z for z in overrides if d == z or d.endswith(f".{z}")]
+        if matches:
+            return max(matches, key=len)
+    return ".".join(d.split(".")[-2:])
 
 
 def _dns01_txt_value(key_authorization: bytes) -> str:
@@ -94,12 +102,14 @@ class JackdawAcmeClient(AcmeClient):
         dns_provider: DNSProvider,
         propagation_wait: int,
         verify_ssl: bool = True,
+        zone_overrides: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(directory_url, **kwargs)
         self._dns = dns_provider
         self._propagation_wait = propagation_wait
         self._verify_ssl = verify_ssl
+        self._zone_overrides = zone_overrides or []
         # Map of finalize-URL → order-URL captured in new_order().  Keyed per
         # order (finalize URLs are unique) so concurrent orders on this shared
         # client instance never clobber each other's order URL.
@@ -204,7 +214,7 @@ class JackdawAcmeClient(AcmeClient):
         Returns:
             ``True`` on success, ``False`` if the DNS call failed.
         """
-        apex = _apex_domain(domain)
+        apex = _apex_domain(domain, self._zone_overrides)
         name = f"_acme-challenge.{domain}"
         value = _dns01_txt_value(self.get_key_authorization(challenge))
 
@@ -226,7 +236,7 @@ class JackdawAcmeClient(AcmeClient):
         Failure is logged as a warning but does not propagate — a lingering
         TXT record is harmless.
         """
-        apex = _apex_domain(domain)
+        apex = _apex_domain(domain, self._zone_overrides)
         name = f"_acme-challenge.{domain}"
 
         try:
@@ -274,6 +284,7 @@ async def init_account(dns_provider: DNSProvider) -> JackdawAcmeClient:
         dns_provider=dns_provider,
         propagation_wait=settings.dns_propagation_wait,
         verify_ssl=settings.le_verify_ssl,
+        zone_overrides=settings.dns_zone_override_list,
         key=key,
         alg=ES256,
     )

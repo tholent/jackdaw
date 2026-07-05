@@ -37,6 +37,7 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 _INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS ix_accounts_public_key ON accounts (public_key)",
     "CREATE INDEX IF NOT EXISTS ix_nonces_created_at ON nonces (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_orders_account_id ON orders (account_id)",
 )
 
 

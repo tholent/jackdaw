@@ -48,6 +48,23 @@ def test_apex_domain_trailing_dot_stripped() -> None:
     assert _apex_domain("sub.example.com.") == "example.com"
 
 
+def test_apex_domain_override_multi_label_tld() -> None:
+    # Without the override, the naive heuristic would wrongly return "co.uk".
+    assert _apex_domain("a.example.co.uk", ["example.co.uk"]) == "example.co.uk"
+
+
+def test_apex_domain_override_exact_match() -> None:
+    assert _apex_domain("example.co.uk", ["example.co.uk"]) == "example.co.uk"
+
+
+def test_apex_domain_override_longest_zone_wins() -> None:
+    assert _apex_domain("x.a.example.co.uk", ["co.uk", "example.co.uk"]) == "example.co.uk"
+
+
+def test_apex_domain_non_matching_override_falls_back() -> None:
+    assert _apex_domain("sub.example.com", ["other.co.uk"]) == "example.com"
+
+
 # ---------------------------------------------------------------------------
 # _dns01_txt_value — RFC 8555 §8.4
 # ---------------------------------------------------------------------------

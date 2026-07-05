@@ -16,7 +16,11 @@ class Settings(BaseSettings):
     # --- Optional with defaults ---
     le_directory: str = "https://acme-v02.api.letsencrypt.org/directory"
     dns_propagation_wait: int = 30
-    database_url: str = "sqlite+aiosqlite:///data/relay.db"
+    # Absolute path (four slashes) pointing at the /data volume.  A relative
+    # default would resolve against the CWD (/app in the image), creating an
+    # ephemeral DB inside the container rather than on the persistent volume.
+    # Running outside Docker? Override DATABASE_URL to a writable location.
+    database_url: str = "sqlite+aiosqlite:////data/relay.db"
     le_account_key_path: str = "/data/le_account.key"
     ssl_dir: str = "/data/ssl"
     nonce_ttl: int = 600  # seconds; 10 minutes
@@ -30,6 +34,16 @@ class Settings(BaseSettings):
     challenge_timeout: int = 5  # seconds per attempt
     challenge_retries: int = 3
     challenge_retry_delay: int = 2  # seconds between retries
+    # Comma-separated list of known apex (registrable) zones.  Needed for
+    # multi-label public suffixes (e.g. ``example.co.uk``) where the naive
+    # last-two-labels heuristic would wrongly derive ``co.uk``.  A domain is
+    # matched against the longest configured zone it falls under.
+    dns_zone_overrides: str = ""
+    # Per-account order rate limit.  ``0`` disables it; a positive value caps
+    # the number of new orders an account may create within ORDER_RATE_WINDOW
+    # seconds, guarding against exhausting Let's Encrypt's rate limits.
+    order_rate_limit: int = 0
+    order_rate_window: int = 604800  # 7 days, matching LE's certificates/week window
 
     model_config = {"env_file": ".env", "case_sensitive": False, "extra": "ignore"}
 
@@ -51,6 +65,13 @@ class Settings(BaseSettings):
         if not self.allowed_domains:
             return []
         return [d.strip() for d in self.allowed_domains.split(",") if d.strip()]
+
+    @property
+    def dns_zone_override_list(self) -> list[str]:
+        """Return *dns_zone_overrides* parsed into a list (empty → none)."""
+        if not self.dns_zone_overrides:
+            return []
+        return [z.strip().rstrip(".") for z in self.dns_zone_overrides.split(",") if z.strip()]
 
 
 @lru_cache

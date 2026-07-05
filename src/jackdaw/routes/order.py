@@ -9,7 +9,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw._util import b64url_decode
@@ -62,6 +62,38 @@ def _validate_identifiers(identifiers: list[Identifier]) -> None:
             )
 
 
+async def _check_order_rate_limit(db: AsyncSession, account_id: str) -> None:
+    """Reject the order if the account exceeded its recent order quota.
+
+    Disabled when ``ORDER_RATE_LIMIT`` is ``0``.  Otherwise counts the account's
+    orders created within the last ``ORDER_RATE_WINDOW`` seconds and rejects once
+    the cap is reached, guarding against exhausting Let's Encrypt's rate limits.
+
+    Raises:
+        HTTPException(429): The account is over its order rate limit.
+    """
+    settings = get_settings()
+    limit = settings.order_rate_limit
+    if limit <= 0:
+        return
+    window_start = datetime.now(UTC) - timedelta(seconds=settings.order_rate_window)
+    count = await db.scalar(
+        select(func.count())
+        .select_from(Order)
+        .where(Order.account_id == account_id, Order.created_at >= window_start)
+    )
+    if count is not None and count >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "type": "urn:ietf:params:acme:error:rateLimited",
+                "detail": (
+                    f"Order rate limit of {limit} per {settings.order_rate_window}s exceeded"
+                ),
+            },
+        )
+
+
 def _check_domain_policy(identifiers: list[Identifier]) -> None:
     """Reject identifiers not under an allowed base domain.
 
@@ -91,6 +123,7 @@ def _check_domain_policy(identifiers: list[Identifier]) -> None:
     responses={
         400: {"description": "Malformed or missing identifiers"},
         403: {"description": "Domain not permitted by policy"},
+        429: {"description": "Account order rate limit exceeded"},
     },
 )
 async def new_order(request: Request, db: _DB) -> JSONResponse:
@@ -105,6 +138,7 @@ async def new_order(request: Request, db: _DB) -> JSONResponse:
 
     _validate_identifiers(order_req.identifiers)
     _check_domain_policy(order_req.identifiers)
+    await _check_order_rate_limit(db, account_id)
 
     settings = get_settings()
     base = settings.relay_base_url
