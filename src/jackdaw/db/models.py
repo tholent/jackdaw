@@ -16,8 +16,9 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[str] = mapped_column(primary_key=True)
-    # Canonical (sorted-key) JSON of the JWK public key.
-    public_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # Canonical (sorted-key) JSON of the JWK public key.  Indexed: looked up on
+    # every newAccount and on every JWS verification carrying a `kid`.
+    public_key: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     # JSON array of contact URIs, e.g. ["mailto:admin@example.com"].
     contact: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(default="valid")
@@ -51,7 +52,7 @@ class Authorization(Base):
     identifier: Mapped[str] = mapped_column()
     # pending / valid / invalid
     status: Mapped[str] = mapped_column(default="pending")
-    # Random token issued to the client for the dns-01 challenge URL.
+    # Random token issued to the client for the http-01 challenge URL.
     challenge_token: Mapped[str | None] = mapped_column()
     le_authz_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime)
@@ -76,4 +77,5 @@ class Nonce(Base):
 
     value: Mapped[str] = mapped_column(primary_key=True)
     used: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime)
+    # Indexed: filtered by consume_nonce and prune_nonces on every request/prune.
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True)

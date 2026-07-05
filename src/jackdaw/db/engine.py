@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from jackdaw.config import get_settings
@@ -29,10 +30,22 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 )
 
 
+# Indexes to ensure on existing databases.  ``create_all`` adds indexes only
+# for tables it creates, so pre-existing deployments need these explicit,
+# idempotent statements.  Names match SQLAlchemy's default (``ix_<table>_<col>``)
+# so they are never created twice.
+_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS ix_accounts_public_key ON accounts (public_key)",
+    "CREATE INDEX IF NOT EXISTS ix_nonces_created_at ON nonces (created_at)",
+)
+
+
 async def init_db() -> None:
-    """Create all tables that do not yet exist (idempotent)."""
+    """Create all tables and indexes that do not yet exist (idempotent)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        for stmt in _INDEX_STATEMENTS:
+            await conn.execute(text(stmt))
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
