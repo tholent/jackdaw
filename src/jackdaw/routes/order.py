@@ -33,6 +33,35 @@ _DB = Annotated[AsyncSession, Depends(get_db)]
 _background_tasks: set[asyncio.Task[None]] = set()
 
 
+def _validate_identifiers(identifiers: list[Identifier]) -> None:
+    """Reject malformed identifiers before persisting anything.
+
+    Jackdaw only issues DNS certificates, so every identifier must be
+    ``type="dns"`` with a non-empty value.  Catching this here avoids writing
+    invalid rows that Let's Encrypt would reject later.
+
+    Raises:
+        HTTPException(400): No identifiers, or one has a bad type/value.
+    """
+    if not identifiers:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "urn:ietf:params:acme:error:malformed",
+                "detail": "Order must contain at least one identifier",
+            },
+        )
+    for ident in identifiers:
+        if ident.type != "dns" or not ident.value.strip():
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "type": "urn:ietf:params:acme:error:malformed",
+                    "detail": "Each identifier must be type 'dns' with a non-empty value",
+                },
+            )
+
+
 def _check_domain_policy(identifiers: list[Identifier]) -> None:
     """Reject identifiers not under an allowed base domain.
 
@@ -57,7 +86,13 @@ def _check_domain_policy(identifiers: list[Identifier]) -> None:
             )
 
 
-@router.post("/acme/new-order", responses={403: {"description": "Domain not permitted by policy"}})
+@router.post(
+    "/acme/new-order",
+    responses={
+        400: {"description": "Malformed or missing identifiers"},
+        403: {"description": "Domain not permitted by policy"},
+    },
+)
 async def new_order(request: Request, db: _DB) -> JSONResponse:
     """Create a new certificate order (RFC 8555 §7.4).
 
@@ -68,6 +103,7 @@ async def new_order(request: Request, db: _DB) -> JSONResponse:
     payload, account_id = await verify_jws(request, db)
     order_req = NewOrderRequest.model_validate(payload)
 
+    _validate_identifiers(order_req.identifiers)
     _check_domain_policy(order_req.identifiers)
 
     settings = get_settings()

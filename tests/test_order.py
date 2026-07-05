@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw.db.models import Authorization, Order
-from jackdaw.routes.order import _check_domain_policy
+from jackdaw.routes.order import _check_domain_policy, _validate_identifiers
 from jackdaw.schemas.acme import Identifier
 from jackdaw.services.nonce import generate_nonce
 from tests.conftest import build_jws, jwk_for_key, make_ec_key
@@ -97,6 +97,33 @@ def test_check_domain_policy_allows_subdomain() -> None:
     with patch("jackdaw.routes.order.get_settings") as mock_settings:
         mock_settings.return_value.allowed_domain_list = ["example.com"]
         _check_domain_policy([Identifier(type="dns", value="sub.example.com")])  # no raise
+
+
+# ---------------------------------------------------------------------------
+# _validate_identifiers unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_validate_identifiers_accepts_valid_dns() -> None:
+    _validate_identifiers([Identifier(type="dns", value="example.com")])  # no raise
+
+
+def test_validate_identifiers_rejects_empty_list() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_identifiers([])
+    assert exc_info.value.status_code == 400
+
+
+def test_validate_identifiers_rejects_non_dns_type() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_identifiers([Identifier(type="ip", value="192.168.1.1")])
+    assert exc_info.value.status_code == 400
+
+
+def test_validate_identifiers_rejects_blank_value() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_identifiers([Identifier(type="dns", value="   ")])
+    assert exc_info.value.status_code == 400
 
 
 # ---------------------------------------------------------------------------
