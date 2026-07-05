@@ -41,6 +41,14 @@ services:
       - ALLOWED_DOMAINS=${ALLOWED_DOMAINS:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DATABASE_URL=sqlite+aiosqlite:////data/relay.db
+      - LE_VERIFY_SSL=${LE_VERIFY_SSL:-true}
+      - CHALLENGE_HTTP_PORT=${CHALLENGE_HTTP_PORT:-80}
+      - CHALLENGE_TIMEOUT=${CHALLENGE_TIMEOUT:-5}
+      - CHALLENGE_RETRIES=${CHALLENGE_RETRIES:-3}
+      - CHALLENGE_RETRY_DELAY=${CHALLENGE_RETRY_DELAY:-2}
+      - NONCE_TTL=${NONCE_TTL:-600}
+      - SSL_DIR=${SSL_DIR:-/data/ssl}
+      - LE_ACCOUNT_KEY_PATH=${LE_ACCOUNT_KEY_PATH:-/data/le_account.key}
     volumes:
       - jackdaw-data:/data
     expose:
