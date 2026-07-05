@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 from typing import Annotated, Any
 
@@ -12,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from jackdaw._util import b64url_decode
 from jackdaw.db.engine import get_db
 from jackdaw.db.models import Certificate, Order
 from jackdaw.services.jws import verify_jws
@@ -33,11 +33,6 @@ def _serial_from_pem(pem_chain: str) -> int:
     pem_bytes = pem_chain.encode()
     cert = x509.load_pem_x509_certificate(pem_bytes)
     return cert.serial_number
-
-
-def _b64_pad(s: str) -> str:
-    pad = 4 - len(s) % 4
-    return s + ("=" * pad if pad != 4 else "")
 
 
 @router.post("/acme/revoke-cert")
@@ -67,7 +62,7 @@ async def revoke_cert(request: Request, db: _DB) -> JSONResponse:
 
     # Decode the DER certificate to extract its serial number.
     try:
-        cert_der = base64.urlsafe_b64decode(_b64_pad(cert_b64))
+        cert_der = b64url_decode(cert_b64)
         client_cert = x509.load_der_x509_certificate(cert_der)
         serial = client_cert.serial_number
     except Exception as exc:
