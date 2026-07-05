@@ -3,6 +3,7 @@
 import logging
 
 import httpx
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 from jackdaw.dns.base import DNSProvider
@@ -13,7 +14,11 @@ log = logging.getLogger(__name__)
 class _CloudflareSettings(BaseSettings):
     """Cloudflare API credentials read from ``CLOUDFLARE_*`` env vars."""
 
-    api_token: str = ""
+    # min_length=1 (and no default): a missing *or empty* token fails at startup
+    # rather than silently starting and failing on the first API call.  docker
+    # compose passes CLOUDFLARE_API_TOKEN as "" when unset, so a bare `str`
+    # default would not catch it — the length constraint does.
+    api_token: str = Field(min_length=1)
 
     model_config = {"env_prefix": "CLOUDFLARE_", "env_file": ".env", "extra": "ignore"}
 

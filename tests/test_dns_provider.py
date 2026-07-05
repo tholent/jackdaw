@@ -128,6 +128,16 @@ _CF_ZONE_URL = "https://api.cloudflare.com/client/v4/zones"
 _CF_RECORDS_URL = "https://api.cloudflare.com/client/v4/zones/zone123/dns_records"
 
 
+def test_cloudflare_empty_token_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty CLOUDFLARE_API_TOKEN (as docker-compose passes when unset) must
+    fail at construction rather than silently starting."""
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "")
+    with pytest.raises(ValidationError):
+        CloudflareDNSProvider()
+
+
 @respx.mock
 async def test_cloudflare_set_txt_creates_record(monkeypatch: pytest.MonkeyPatch) -> None:
     """set_txt should look up the zone then POST a TXT record."""
