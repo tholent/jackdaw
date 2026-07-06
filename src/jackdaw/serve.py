@@ -166,5 +166,5 @@ def main() -> None:
     health_server.should_exit = True
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

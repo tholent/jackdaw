@@ -12,9 +12,9 @@ own regression test, and every phase ends with the full gate green:
 | Phase | Axis | Target | Status |
 |-------|------|--------|--------|
 | 1 | Correctness | B+ → A | ✅ **Done** (merged to `main`, commit `04a5ca6`) |
-| 2 | Security | A− → A | ⬜ Not started |
-| 3 | Maintainability | A− → A | ⬜ Not started |
-| 4 | Test coverage | A− → A | ⬜ Not started |
+| 2 | Security | A− → A | ✅ **Done** (merged to `main`, commit `afcc0e5`) |
+| 3 | Maintainability | A− → A | ✅ **Done** (merged to `main`, commit `a069b85`) |
+| 4 | Test coverage | A− → A | ✅ **Done** (coverage 92%, enforced floor 90%) |
 
 ---
 

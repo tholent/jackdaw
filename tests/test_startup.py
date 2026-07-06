@@ -286,6 +286,56 @@ def test_write_relay_cert_writes_files(tmp_path) -> None:
     assert oct(key_path.stat().st_mode)[-3:] == "600"
 
 
+def test_write_relay_cert_renames_key_before_cert(tmp_path) -> None:
+    """The key is renamed into place before the cert, so fullchain.pem is never
+    momentarily paired with an old key."""
+    from unittest.mock import patch
+
+    from jackdaw.services.relay_cert import CERT_FILENAME, KEY_FILENAME, write_relay_cert
+
+    cert_path = tmp_path / CERT_FILENAME
+    key_path = tmp_path / KEY_FILENAME
+    renamed: list[str] = []
+
+    with patch(
+        "jackdaw.services.relay_cert.os.replace",
+        side_effect=lambda _src, dst: renamed.append(str(dst)),
+    ):
+        write_relay_cert(cert_path, key_path, "chain", "key")
+
+    assert renamed == [str(key_path), str(cert_path)]
+
+
+async def test_issue_relay_cert_orders_and_writes(tmp_path) -> None:
+    """issue_relay_cert submits a CSR to LE and writes the returned chain + key."""
+    from unittest.mock import AsyncMock, Mock, patch
+
+    from jackdaw.services.relay_cert import CERT_FILENAME, KEY_FILENAME, issue_relay_cert
+
+    fake_chain = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+
+    with (
+        patch(
+            "jackdaw.services.relay_cert.le.order_cert",
+            new=AsyncMock(return_value=fake_chain),
+        ) as order_cert,
+        patch("jackdaw.services.relay_cert.get_settings") as ms,
+    ):
+        ms.return_value.ssl_dir = str(tmp_path)
+        await issue_relay_cert(Mock(), "relay.test")
+
+    # LE was asked to sign a DER CSR for the relay domain.
+    order_cert.assert_awaited_once()
+    args = order_cert.await_args[0]
+    assert args[1] == "relay.test"
+    assert isinstance(args[2], bytes) and len(args[2]) > 0
+
+    assert (tmp_path / CERT_FILENAME).read_text() == fake_chain
+    key_path = tmp_path / KEY_FILENAME
+    assert "PRIVATE KEY" in key_path.read_text()
+    assert oct(key_path.stat().st_mode)[-3:] == "600"
+
+
 def test_le_verify_ssl_false_with_staging_ok() -> None:
     """LE_VERIFY_SSL=false with staging directory must not raise."""
     from jackdaw.config import Settings

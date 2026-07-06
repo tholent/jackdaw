@@ -55,6 +55,9 @@ relative_files = true
 
 [tool.coverage.report]
 show_missing = true
+# Enforced floor (currently ~92%).  Set below the current figure so ordinary
+# additions don't fail CI, while still catching a real coverage regression.
+fail_under = 90
 
 # ---------------------------------------------------------------------------
 # ruff
