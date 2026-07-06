@@ -237,6 +237,40 @@ healthcheck uses it, and it's the endpoint to point external load balancers or
 uptime monitors at. It performs no dependency checks — it only confirms the
 process is serving requests.
 
+The relay also exposes **`GET /version`**, which returns the running release as
+`{"version": "X.Y.Z"}` — handy for confirming which image is deployed.
+
+## Versioning & Releasing
+
+Jackdaw follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`,
+where a **MAJOR** bump signals a breaking change, **MINOR** adds functionality in
+a backward-compatible way, and **PATCH** is a backward-compatible bug fix. The
+version lives in one place — `pyproject.toml` — and the running app reports it via
+`jackdaw.__version__` and the `GET /version` endpoint.
+
+Releases are cut from git tags named `vX.Y.Z`. Pushing such a tag triggers the
+[`Release`](.github/workflows/release.yml) workflow, which builds the Docker image
+and publishes it to `ghcr.io/tholent/jackdaw` with the tags `X.Y.Z`, `X.Y`,
+`latest`, and `sha-<commit>`. Ordinary branch and PR pushes never publish.
+
+To cut a release:
+
+```bash
+# 1. Bump the version in pyproject.toml (and refresh the lockfile if needed)
+uv lock
+git commit -am "chore: release vX.Y.Z"
+
+# 2. Tag it (the tag must match the pyproject.toml version, or the workflow fails)
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin main --tags
+```
+
+Pull the published image with:
+
+```bash
+docker pull ghcr.io/tholent/jackdaw:X.Y.Z
+```
+
 ## DNS providers
 
 | Provider | `DNS_PROVIDER` value | Status |
