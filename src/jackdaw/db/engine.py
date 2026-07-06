@@ -1,34 +1,36 @@
-"""Async SQLAlchemy engine, session factory, and DB initialisation helper."""
+"""Async SQLAlchemy engine, session factory, and DB initialisation helper.
+
+The engine and session factory are created lazily on first use (see
+``get_engine``/``get_sessionmaker``) rather than at import time.  Importing this
+module therefore has no side effect and does not require the environment to be
+configured yet — which removes the fragile "set env vars before importing any
+jackdaw module" ordering the tests previously depended on.
+
+The module-level names ``engine`` and ``AsyncSessionLocal`` remain available for
+backwards compatibility via :pep:`562` ``__getattr__``; accessing either builds
+(and caches) the underlying object on demand.
+"""
 
 from collections.abc import AsyncGenerator
+from functools import lru_cache
+from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from jackdaw.config import get_settings
 from jackdaw.db.models import Base
 
-_settings = get_settings()
-_url = _settings.database_url
-
-# SQLite in-memory databases are connection-local.  Using StaticPool forces
-# all SQLAlchemy sessions to share a single connection and therefore a single
-# shared in-memory database.  This is a no-op for file-backed databases.
-_engine_kwargs: dict[str, object] = {}
-if ":memory:" in _url:
-    from sqlalchemy.pool import StaticPool
-
-    _engine_kwargs = {
-        "connect_args": {"check_same_thread": False},
-        "poolclass": StaticPool,
-    }
-
-engine = create_async_engine(_url, **_engine_kwargs)
-
-AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    engine, expire_on_commit=False
-)
-
+# Backwards-compatible lazy attributes (resolved by __getattr__ below).  Declared
+# for type checkers; they are intentionally never assigned so that attribute
+# access falls through to __getattr__.
+engine: AsyncEngine
+AsyncSessionLocal: async_sessionmaker[AsyncSession]
 
 # Indexes to ensure on existing databases.  ``create_all`` adds indexes only
 # for tables it creates, so pre-existing deployments need these explicit,
@@ -41,9 +43,43 @@ _INDEX_STATEMENTS = (
 )
 
 
+@lru_cache(maxsize=1)
+def get_engine() -> AsyncEngine:
+    """Return the process-wide async engine, creating it on first call."""
+    url = get_settings().database_url
+
+    # SQLite in-memory databases are connection-local.  Using StaticPool forces
+    # all SQLAlchemy sessions to share a single connection and therefore a single
+    # shared in-memory database.  This is a no-op for file-backed databases.
+    engine_kwargs: dict[str, Any] = {}
+    if ":memory:" in url:
+        from sqlalchemy.pool import StaticPool
+
+        engine_kwargs = {
+            "connect_args": {"check_same_thread": False},
+            "poolclass": StaticPool,
+        }
+
+    return create_async_engine(url, **engine_kwargs)
+
+
+@lru_cache(maxsize=1)
+def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Return the process-wide session factory, creating it on first call."""
+    return async_sessionmaker(get_engine(), expire_on_commit=False)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "engine":
+        return get_engine()
+    if name == "AsyncSessionLocal":
+        return get_sessionmaker()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 async def init_db() -> None:
     """Create all tables and indexes that do not yet exist (idempotent)."""
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         for stmt in _INDEX_STATEMENTS:
             await conn.execute(text(stmt))
@@ -51,5 +87,5 @@ async def init_db() -> None:
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency — yields a DB session and closes it on exit."""
-    async with AsyncSessionLocal() as session:
+    async with get_sessionmaker()() as session:
         yield session
