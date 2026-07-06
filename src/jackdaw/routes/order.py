@@ -33,6 +33,22 @@ _DB = Annotated[AsyncSession, Depends(get_db)]
 _background_tasks: set[asyncio.Task[None]] = set()
 
 
+def _isoformat_utc(dt: datetime | None) -> str | None:
+    """Serialize a stored UTC datetime as RFC 3339 with an explicit offset.
+
+    Every value written here is ``datetime.now(UTC)``, but SQLAlchemy's SQLite
+    ``DateTime`` column round-trips values as naive (tzinfo is not persisted).
+    ``.isoformat()`` on that naive result omits the offset entirely, which
+    real RFC 3339 parsers (e.g. Go's ``time.Parse``, used by Caddy/acmez)
+    reject outright rather than assuming UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.isoformat()
+
+
 def _validate_identifiers(identifiers: list[Identifier]) -> None:
     """Reject malformed identifiers before persisting anything.
 
@@ -180,7 +196,7 @@ async def new_order(request: Request, db: _DB) -> JSONResponse:
         identifiers=order_req.identifiers,
         authorizations=authz_urls,
         finalize=f"{base}/acme/order/{order_id}/finalize",
-        expires=expires_at.isoformat(),
+        expires=_isoformat_utc(expires_at),
     )
     return JSONResponse(
         content=body.model_dump(exclude_none=True),
@@ -210,7 +226,7 @@ async def get_order(order_id: str, request: Request, db: _DB) -> JSONResponse:
         authorizations=authz_urls,
         finalize=f"{base}/acme/order/{order_id}/finalize",
         certificate=(f"{base}/acme/cert/{order.cert_id}" if order.cert_id else None),
-        expires=order.expires_at.isoformat() if order.expires_at else None,
+        expires=_isoformat_utc(order.expires_at),
     )
     return JSONResponse(content=body.model_dump(exclude_none=True))
 
@@ -273,6 +289,6 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
         identifiers=[Identifier(**i) for i in identifiers],
         authorizations=[f"{base}/acme/authz/{a.id}" for a in authzs],
         finalize=f"{base}/acme/order/{order_id}/finalize",
-        expires=order.expires_at.isoformat() if order.expires_at else None,
+        expires=_isoformat_utc(order.expires_at),
     )
     return JSONResponse(content=body.model_dump(exclude_none=True))

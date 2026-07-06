@@ -255,3 +255,10 @@ async def test_finalize_order_ready_dispatches_task(
     assert resp.status_code == 200
     body_json = resp.json()
     assert "finalize" in body_json
+
+    # `expires` must be a real RFC 3339 timestamp with an explicit UTC offset.
+    # order.expires_at was loaded from the DB above (naive datetime, since
+    # SQLite drops tzinfo on round-trip) — real ACME clients like Caddy/acmez
+    # reject a bare "...564681" with no "Z"/offset as invalid RFC 3339.
+    expires = datetime.fromisoformat(body_json["expires"])
+    assert expires.tzinfo is not None
