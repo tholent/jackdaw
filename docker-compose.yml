@@ -17,7 +17,12 @@ services:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/reload-on-cert-change.sh:/reload-on-cert-change.sh:ro
       - jackdaw-data:/data:ro
+    # Jackdaw writes the real LE cert to the shared volume but runs in another
+    # container and can't signal nginx; this wrapper reloads nginx when the
+    # cert changes. The stock entrypoint (envsubst etc.) still runs first.
+    command: ["/bin/sh", "/reload-on-cert-change.sh"]
     depends_on:
       init-certs:
         condition: service_completed_successfully

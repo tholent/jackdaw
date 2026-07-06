@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import signal
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -51,11 +50,17 @@ async def _prune_loop() -> None:
 
 
 def _write_relay_cert(cert_path: Path, key_path: Path, pem_chain: str, key_pem: str) -> None:
-    """Write certificate and key to disk, then signal nginx — runs in a thread.
+    """Atomically write the relay's certificate and key to disk — runs in a thread.
 
     Both files are written to temp paths and atomically renamed so a crash
     mid-write can never leave nginx pairing a new cert with an old key (or a
-    truncated file), which would break the TLS handshake.
+    truncated file), which would break the TLS handshake.  The key is renamed
+    before the cert so that once fullchain.pem changes it is already paired
+    with the new key on disk.
+
+    nginx runs in a separate container and cannot be signalled from here; it
+    watches this file itself (see nginx/reload-on-cert-change.sh) and reloads
+    when the cert changes.
     """
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     cert_tmp = cert_path.with_name(cert_path.name + ".tmp")
@@ -67,12 +72,6 @@ def _write_relay_cert(cert_path: Path, key_path: Path, pem_chain: str, key_pem: 
     os.replace(key_tmp, key_path)
     os.replace(cert_tmp, cert_path)
     log.info("Relay TLS cert written to %s", cert_path)
-
-    nginx_pid_file = Path("/var/run/nginx.pid")
-    if nginx_pid_file.exists():
-        pid = int(nginx_pid_file.read_text().strip())
-        os.kill(pid, signal.SIGHUP)
-        log.info("Sent SIGHUP to nginx pid %d", pid)
 
 
 def _relay_cert_exists() -> bool:
@@ -119,12 +118,13 @@ def _relay_cert_days_remaining() -> float | None:
 async def _bootstrap_relay_cert(
     client: le.JackdawAcmeClient, relay_domain: str, *, force: bool = False
 ) -> None:
-    """Issue a cert for *relay_domain*, then signal nginx to reload.
+    """Issue a cert for *relay_domain* and write it to the shared data volume.
 
     On first boot (force=False) this resolves the chicken-and-egg problem:
     nginx starts with the self-signed cert from the init container, Jackdaw
-    requests a real LE cert, writes it to the shared data volume, then sends
-    SIGHUP to nginx.  Called with force=True by the renewal loop.
+    requests a real LE cert and writes it to the shared data volume, and nginx
+    (watching the file itself) reloads to pick it up.  Called with force=True
+    by the renewal loop.
     """
     if "://" in relay_domain:
         log.debug("relay_domain is a URL (%s); skipping TLS bootstrap", relay_domain)
