@@ -113,12 +113,14 @@ docker compose up -d
 
 On first boot Jackdaw goes through a self-bootstrapping sequence:
 
-1. An init container generates a self-signed certificate so nginx can start
-   immediately.
-2. Jackdaw registers a Let's Encrypt account and requests a real certificate
-   for `RELAY_DOMAIN` using its own DNS-01 solver.
-3. The certificate is written to the shared data volume and nginx reloads it
-   via `SIGHUP`.
+1. Jackdaw registers a Let's Encrypt account and requests a certificate for
+   `RELAY_DOMAIN` using its own DNS-01 solver. The public HTTPS listener stays
+   offline until that certificate is on disk — there is no self-signed
+   placeholder, so clients see a clean "connection refused" rather than a TLS
+   error while issuance is in flight.
+2. Jackdaw then terminates TLS itself and serves the ACME API directly on
+   port 443. If issuance fails (bad DNS credentials, propagation issues), it
+   retries with backoff and logs each attempt.
 
 The relay is ready once `GET https://jackdaw.example.com/directory` returns
 200. Check progress with `docker compose logs -f jackdaw`.
@@ -191,6 +193,7 @@ complete reference.
 | `CHALLENGE_RETRIES` | No | `3` | Number of fetch attempts before failing the challenge |
 | `CHALLENGE_RETRY_DELAY` | No | `2` | Seconds between retry attempts |
 | `DATABASE_URL` | No | `sqlite+aiosqlite:////data/relay.db` | SQLite path; must point at a persistent volume. Override when running outside Docker |
+| `SERVE_TLS` | No | `true` | Terminate TLS on port 443. Set `false` to serve plain HTTP on port 8000 (tests, or behind an external TLS proxy) |
 | `DNS_ZONE_OVERRIDES` | No | _(none)_ | Comma-separated apex zones for multi-label TLDs (e.g. `example.co.uk`) |
 | `ORDER_RATE_LIMIT` | No | `0` | Max orders per account within the window; `0` disables |
 | `ORDER_RATE_WINDOW` | No | `604800` | Rate-limit window in seconds (default 7 days) |
@@ -257,8 +260,9 @@ once everything is working.
 ## Certificate renewal
 
 **Relay certificate** (`RELAY_DOMAIN`): renewed automatically. A background
-task checks daily and renews when fewer than 30 days remain, reloading nginx
-after each renewal.
+task checks daily and renews when fewer than 30 days remain; the live TLS
+context is reloaded in place, so new connections pick up the renewed
+certificate without a restart.
 
 **Client certificates**: renewal is the responsibility of each client's ACME
 implementation — certbot's systemd timer, Caddy's built-in renewal, etc.
@@ -268,10 +272,14 @@ perspective.
 ## Health checks
 
 The relay exposes an unauthenticated liveness endpoint at **`GET /healthz`**
-that returns `200 OK` when the app is up. The bundled `docker-compose.yml`
-healthcheck uses it, and it's the endpoint to point external load balancers or
-uptime monitors at. It performs no dependency checks — it only confirms the
-process is serving requests.
+that returns `200 OK` when the app is up — the endpoint to point external load
+balancers or uptime monitors at. It performs no dependency checks — it only
+confirms the process is serving requests.
+
+Inside the container a plain-HTTP copy of the liveness endpoint is also served
+on `127.0.0.1:8000`; the bundled `docker-compose.yml` healthcheck uses it so
+the container reports healthy from process start, including while the
+first-boot certificate issuance still has the public HTTPS listener offline.
 
 The relay also exposes **`GET /version`**, which returns the running release as
 `{"version": "X.Y.Z"}` — handy for confirming which image is deployed.
