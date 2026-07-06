@@ -42,6 +42,12 @@ _INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS ix_orders_account_id ON orders (account_id)",
 )
 
+# Columns added after the initial release.  ``create_all`` never alters an
+# existing table, so pre-existing deployments need these applied explicitly.
+# SQLite has no ``ADD COLUMN IF NOT EXISTS``, so each is guarded by a
+# ``PRAGMA table_info`` check in ``_ensure_columns``.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("orders", "error", "TEXT"),)
+
 
 @lru_cache(maxsize=1)
 def get_engine() -> AsyncEngine:
@@ -77,12 +83,27 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+async def _ensure_columns(conn: Any) -> None:
+    """Add post-release columns to pre-existing tables (idempotent).
+
+    ``create_all`` creates missing tables but never alters existing ones, so a
+    database created by an earlier release is missing columns added later.
+    Each column is applied only if ``PRAGMA table_info`` shows it absent.
+    """
+    for table, column, coltype in _ADDED_COLUMNS:
+        result = await conn.execute(text(f"PRAGMA table_info({table})"))
+        existing = {row[1] for row in result}
+        if column not in existing:
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+
+
 async def init_db() -> None:
-    """Create all tables and indexes that do not yet exist (idempotent)."""
+    """Create all tables, indexes, and columns that do not yet exist (idempotent)."""
     async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         for stmt in _INDEX_STATEMENTS:
             await conn.execute(text(stmt))
+        await _ensure_columns(conn)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

@@ -34,7 +34,15 @@ from gufo.acme.clients.base import (  # type: ignore[attr-defined]
     AcmeClient,
     AcmeOrder,
 )
-from gufo.acme.error import AcmeCertificateError
+from gufo.acme.error import (
+    AcmeCertificateError,
+    AcmeConnectError,
+    AcmeError,
+    AcmeFulfillmentFailed,
+    AcmeRateLimitError,
+    AcmeTimeoutError,
+    AcmeUnauthorizedError,
+)
 from gufo.acme.types import AcmeAuthorization, AcmeChallenge
 from gufo.http.async_client import HttpClient
 from josepy.json_util import encode_b64jose
@@ -319,3 +327,66 @@ async def order_cert(
     csr_pem = _der_to_pem_csr(csr_der)
     result = await client.sign(domain, csr_pem)
     return result.decode()
+
+
+# Map gufo-acme exception types to the ACME problem type + a human-readable
+# detail.  gufo raises bare exception classes for the specific cases below
+# (the upstream LE detail string is not preserved on the exception), so we
+# reconstruct a meaningful problem document from the exception type.
+_ACME_PROBLEMS: list[tuple[type[AcmeError], str, str]] = [
+    (
+        AcmeRateLimitError,
+        "urn:ietf:params:acme:error:rateLimited",
+        "Let's Encrypt rejected the request due to its rate limits; retry later.",
+    ),
+    (
+        AcmeUnauthorizedError,
+        "urn:ietf:params:acme:error:unauthorized",
+        "Let's Encrypt refused to authorize issuance for this domain.",
+    ),
+    (
+        AcmeFulfillmentFailed,
+        "urn:ietf:params:acme:error:dns",
+        "The relay could not fulfil the DNS-01 challenge with Let's Encrypt.",
+    ),
+    (
+        AcmeTimeoutError,
+        "urn:ietf:params:acme:error:connection",
+        "The relay timed out talking to Let's Encrypt.",
+    ),
+    (
+        AcmeConnectError,
+        "urn:ietf:params:acme:error:connection",
+        "The relay could not connect to Let's Encrypt.",
+    ),
+]
+
+
+def acme_problem(exc: BaseException) -> dict[str, str]:
+    """Return an RFC 8555 problem document describing an issuance failure.
+
+    Used to populate an order's ``error`` field so the ACME client learns why
+    issuance failed instead of seeing a bare ``invalid`` status.  Known
+    gufo-acme error types map to a specific ACME error type; a generic
+    ``AcmeError`` carries its own message (gufo formats it as
+    ``[status] type detail``); anything else is reported as an internal error.
+    """
+    for exc_type, problem_type, detail in _ACME_PROBLEMS:
+        if isinstance(exc, exc_type):
+            return {"type": problem_type, "detail": detail}
+    if isinstance(exc, AcmeError):
+        detail = str(exc).strip() or "Let's Encrypt rejected the certificate request."
+        return {"type": "urn:ietf:params:acme:error:serverInternal", "detail": detail}
+    return {
+        "type": "urn:ietf:params:acme:error:serverInternal",
+        "detail": "An unexpected error occurred while issuing the certificate.",
+    }
+
+
+def is_known_acme_error(exc: BaseException) -> bool:
+    """True if *exc* is an expected ACME protocol error (vs. an unexpected bug).
+
+    Lets callers log expected operational failures (rate limits, DNS issues)
+    as clean warnings while still emitting full tracebacks for real bugs.
+    """
+    return isinstance(exc, AcmeError)

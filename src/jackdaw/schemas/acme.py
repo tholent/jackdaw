@@ -90,6 +90,8 @@ class OrderResponse(BaseModel):
     finalize: str
     certificate: str | None = None
     expires: str | None = None
+    # RFC 8555 §7.1.3 problem document, present only on a failed ('invalid') order.
+    error: dict[str, Any] | None = None
 
 
 class FinalizeRequest(BaseModel):

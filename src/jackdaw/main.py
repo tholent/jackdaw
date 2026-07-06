@@ -1,6 +1,7 @@
 """FastAPI application entry-point: lifespan, middleware, and router registration."""
 
 import asyncio
+import json
 import logging
 import os
 import ssl
@@ -30,10 +31,22 @@ _KEY_FILENAME = "privkey.pem"
 _RENEW_THRESHOLD_DAYS = 30
 
 
+_INTERRUPTED_ORDER_ERROR = json.dumps(
+    {
+        "type": "urn:ietf:params:acme:error:serverInternal",
+        "detail": "Certificate issuance was interrupted by a relay restart; submit a new order.",
+    }
+)
+
+
 async def _reset_processing_orders() -> None:
     """Reset orders/authz stuck in 'processing' to 'invalid' after an unclean shutdown."""
     async with AsyncSessionLocal() as db:
-        await db.execute(update(Order).where(Order.status == "processing").values(status="invalid"))
+        await db.execute(
+            update(Order)
+            .where(Order.status == "processing")
+            .values(status="invalid", error=_INTERRUPTED_ORDER_ERROR)
+        )
         await db.execute(
             update(Authorization)
             .where(Authorization.status == "processing")

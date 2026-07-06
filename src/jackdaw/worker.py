@@ -13,6 +13,7 @@ validation → TXT cleanup → cert issuance), stores the certificate, and marks
 the order ``valid``.  Sets the order ``invalid`` on any unrecoverable error.
 """
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -140,12 +141,24 @@ async def process_finalize(
 
     try:
         pem_chain = await le.order_cert(acme_client, domain, csr_der)
-    except Exception:
-        log.exception("LE cert issuance failed for order %s", _s(order_id))
+    except Exception as exc:
+        problem = le.acme_problem(exc)
+        if le.is_known_acme_error(exc):
+            # Expected operational failure (rate limit, DNS, etc.) — log a clean
+            # warning rather than a full traceback.
+            log.warning(
+                "LE cert issuance failed for order %s (%s): %s",
+                _s(order_id),
+                problem["type"],
+                problem["detail"],
+            )
+        else:
+            log.exception("Unexpected error issuing cert for order %s", _s(order_id))
         async with AsyncSessionLocal() as db:
             order = await db.get(Order, order_id)
             if order is not None:
                 order.status = "invalid"
+                order.error = json.dumps(problem)
                 await db.commit()
         return
 

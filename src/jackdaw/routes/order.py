@@ -227,6 +227,7 @@ async def get_order(order_id: str, request: Request, db: _DB) -> JSONResponse:
         finalize=f"{base}/acme/order/{order_id}/finalize",
         certificate=(f"{base}/acme/cert/{order.cert_id}" if order.cert_id else None),
         expires=_isoformat_utc(order.expires_at),
+        error=json.loads(order.error) if order.error else None,
     )
     return JSONResponse(content=body.model_dump(exclude_none=True))
 

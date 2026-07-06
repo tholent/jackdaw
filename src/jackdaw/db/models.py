@@ -41,6 +41,10 @@ class Order(Base):
     cert_id: Mapped[str | None] = mapped_column(ForeignKey("certificates.id"))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime)
+    # JSON problem document (RFC 8555 §7.1.3) set when issuance fails, so the
+    # client learns why the order became 'invalid'.  NULL while the order is
+    # in flight or on success.
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class Authorization(Base):
