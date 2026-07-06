@@ -20,6 +20,8 @@ services:
       - LE_ACCOUNT_KEY_PATH=/tmp/le_account.key
       - DNS_PROPAGATION_WAIT=0
       - LE_VERIFY_SSL=false
+      # Integration tests drive the API over plain HTTP on :8000.
+      - SERVE_TLS=false
     depends_on:
       - pebble
     ports:

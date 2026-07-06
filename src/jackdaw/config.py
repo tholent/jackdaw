@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     ssl_dir: str = "/data/ssl"
     nonce_ttl: int = 600  # seconds; 10 minutes
     log_level: str = "INFO"
+    # When True (production default) the serve entry-point terminates TLS
+    # itself on port 443, obtaining/renewing the cert via Let's Encrypt.
+    # Set SERVE_TLS=false to serve plain HTTP on port 8000 instead (tests,
+    # or when an external proxy terminates TLS).  Ignored — treated as
+    # False — when relay_domain contains a scheme (local-dev mode).
+    serve_tls: bool = True
     # Comma-separated base domains; empty string means no extra restriction (proof is the gate).
     allowed_domains: str = ""
     # Set to False when pointing at Pebble (self-signed TLS) or other test CAs.

@@ -135,12 +135,8 @@ def test_relay_cert_exists_returns_false_when_missing(tmp_path, monkeypatch) -> 
         assert _relay_cert_exists() is False
 
 
-def _write_cert_pair(tmp_path, *, self_signed: bool) -> None:
-    """Write a fullchain.pem/privkey.pem pair to *tmp_path* for _relay_cert_exists tests.
-
-    When self_signed is True the cert mimics the init-certs bootstrap placeholder
-    (issuer == subject); otherwise it mimics a CA-issued cert (issuer != subject).
-    """
+def _write_cert_pair(tmp_path) -> None:
+    """Write a valid fullchain.pem/privkey.pem pair to *tmp_path* for cert tests."""
     from datetime import UTC, datetime, timedelta
 
     from cryptography import x509
@@ -158,9 +154,7 @@ def _write_cert_pair(tmp_path, *, self_signed: bool) -> None:
     key = generate_private_key(SECP256R1())
     now = datetime.now(UTC)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "relay.test")])
-    issuer = (
-        subject if self_signed else x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
-    )
+    issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -177,27 +171,41 @@ def _write_cert_pair(tmp_path, *, self_signed: bool) -> None:
     )
 
 
-def test_relay_cert_exists_returns_true_for_ca_issued_cert(tmp_path) -> None:
-    """A real CA-issued cert (issuer != subject) counts as present."""
+def test_relay_cert_exists_returns_true_for_cert_pair(tmp_path) -> None:
+    """A parseable cert with its key counts as present."""
     from unittest.mock import patch
 
     from jackdaw.main import _relay_cert_exists
 
-    _write_cert_pair(tmp_path, self_signed=False)
+    _write_cert_pair(tmp_path)
 
     with patch("jackdaw.main.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
         assert _relay_cert_exists() is True
 
 
-def test_relay_cert_exists_returns_false_for_selfsigned_placeholder(tmp_path) -> None:
-    """The init-certs self-signed placeholder must not count as a real cert,
-    or first-boot bootstrap would skip LE issuance."""
+def test_relay_cert_exists_returns_false_without_key(tmp_path) -> None:
+    """A cert without its private key is unusable and must not count as present."""
     from unittest.mock import patch
 
-    from jackdaw.main import _relay_cert_exists
+    from jackdaw.main import _KEY_FILENAME, _relay_cert_exists
 
-    _write_cert_pair(tmp_path, self_signed=True)
+    _write_cert_pair(tmp_path)
+    (tmp_path / _KEY_FILENAME).unlink()
+
+    with patch("jackdaw.main.get_settings") as mock_settings:
+        mock_settings.return_value.ssl_dir = str(tmp_path)
+        assert _relay_cert_exists() is False
+
+
+def test_relay_cert_exists_returns_false_for_corrupt_cert(tmp_path) -> None:
+    """An unparseable cert file must be treated as absent."""
+    from unittest.mock import patch
+
+    from jackdaw.main import _CERT_FILENAME, _KEY_FILENAME, _relay_cert_exists
+
+    (tmp_path / _CERT_FILENAME).write_text("this is not a certificate")
+    (tmp_path / _KEY_FILENAME).write_text("this is not a key")
 
     with patch("jackdaw.main.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)

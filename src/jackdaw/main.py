@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ log = logging.getLogger(__name__)
 _LE_PRODUCTION_URL = "https://acme-v02.api.letsencrypt.org/directory"
 _CERT_FILENAME = "fullchain.pem"
 _KEY_FILENAME = "privkey.pem"
+_RENEW_THRESHOLD_DAYS = 30
 
 
 async def _reset_processing_orders() -> None:
@@ -53,14 +55,10 @@ def _write_relay_cert(cert_path: Path, key_path: Path, pem_chain: str, key_pem: 
     """Atomically write the relay's certificate and key to disk — runs in a thread.
 
     Both files are written to temp paths and atomically renamed so a crash
-    mid-write can never leave nginx pairing a new cert with an old key (or a
-    truncated file), which would break the TLS handshake.  The key is renamed
-    before the cert so that once fullchain.pem changes it is already paired
-    with the new key on disk.
-
-    nginx runs in a separate container and cannot be signalled from here; it
-    watches this file itself (see nginx/reload-on-cert-change.sh) and reloads
-    when the cert changes.
+    mid-write can never leave a new cert paired with an old key (or a
+    truncated file) for the next process start.  The key is renamed before
+    the cert so that once fullchain.pem changes it is already paired with
+    the new key on disk.
     """
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     cert_tmp = cert_path.with_name(cert_path.name + ".tmp")
@@ -75,15 +73,7 @@ def _write_relay_cert(cert_path: Path, key_path: Path, pem_chain: str, key_pem: 
 
 
 def _relay_cert_exists() -> bool:
-    """Return True if a real, CA-issued relay cert is already present.
-
-    The init-certs container writes a self-signed placeholder to the same
-    fullchain.pem/privkey.pem paths so nginx can start before Jackdaw has a
-    real cert.  That placeholder must *not* count as "present" here, or the
-    first-boot bootstrap would skip LE issuance entirely.  A self-signed cert
-    has issuer == subject; a Let's Encrypt cert is issued by LE, so the two
-    differ — we use that to tell them apart.
-    """
+    """Return True if a parseable relay cert and its private key are on disk."""
     ssl_dir = Path(get_settings().ssl_dir)
     cert_path = ssl_dir / _CERT_FILENAME
     key_path = ssl_dir / _KEY_FILENAME
@@ -92,11 +82,11 @@ def _relay_cert_exists() -> bool:
     try:
         from cryptography import x509
 
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        x509.load_pem_x509_certificate(cert_path.read_bytes())
     except Exception:
         log.warning("Could not parse relay cert; treating as absent", exc_info=True)
         return False
-    return cert.issuer != cert.subject
+    return True
 
 
 def _relay_cert_days_remaining() -> float | None:
@@ -115,77 +105,79 @@ def _relay_cert_days_remaining() -> float | None:
         return None
 
 
-async def _bootstrap_relay_cert(
-    client: le.JackdawAcmeClient, relay_domain: str, *, force: bool = False
-) -> None:
-    """Issue a cert for *relay_domain* and write it to the shared data volume.
+async def _issue_relay_cert(client: le.JackdawAcmeClient, relay_domain: str) -> None:
+    """Issue a cert for *relay_domain* via DNS-01 and write it to the data volume.
 
-    On first boot (force=False) this resolves the chicken-and-egg problem:
-    nginx starts with the self-signed cert from the init container, Jackdaw
-    requests a real LE cert and writes it to the shared data volume, and nginx
-    (watching the file itself) reloads to pick it up.  Called with force=True
-    by the renewal loop.
+    Raises on failure — callers decide the retry policy (the serve entry-point
+    retries with backoff on first boot; the renewal loop retries daily).
     """
-    if "://" in relay_domain:
-        log.debug("relay_domain is a URL (%s); skipping TLS bootstrap", relay_domain)
-        return  # local dev — no nginx, no cert needed
+    log.info("Requesting TLS cert for %s …", relay_domain)
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+    )
+    from cryptography.x509.oid import NameOID
 
-    if not force and await asyncio.to_thread(_relay_cert_exists):
-        return  # LE cert already in place
-
-    log.info("Bootstrapping TLS cert for %s …", relay_domain)
-    try:
-        from cryptography import x509
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
-        from cryptography.hazmat.primitives.serialization import (
-            Encoding,
-            NoEncryption,
-            PrivateFormat,
+    priv = generate_private_key(SECP256R1())
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, relay_domain)]))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(relay_domain)]),
+            critical=False,
         )
-        from cryptography.x509.oid import NameOID
+        .sign(priv, hashes.SHA256())
+    )
+    csr_der = csr.public_bytes(Encoding.DER)
 
-        priv = generate_private_key(SECP256R1())
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, relay_domain)]))
-            .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName(relay_domain)]),
-                critical=False,
-            )
-            .sign(priv, hashes.SHA256())
-        )
-        csr_der = csr.public_bytes(Encoding.DER)
+    pem_chain = await le.order_cert(client, relay_domain, csr_der)
+    key_pem = priv.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
 
-        pem_chain = await le.order_cert(client, relay_domain, csr_der)
-        key_pem = priv.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
-
-        ssl_dir = Path(get_settings().ssl_dir)
-        await asyncio.to_thread(
-            _write_relay_cert,
-            ssl_dir / _CERT_FILENAME,
-            ssl_dir / _KEY_FILENAME,
-            pem_chain,
-            key_pem,
-        )
-
-    except Exception:
-        log.exception("Failed to bootstrap relay TLS cert — nginx keeps the self-signed cert")
+    ssl_dir = Path(get_settings().ssl_dir)
+    await asyncio.to_thread(
+        _write_relay_cert,
+        ssl_dir / _CERT_FILENAME,
+        ssl_dir / _KEY_FILENAME,
+        pem_chain,
+        key_pem,
+    )
 
 
-async def _renewal_loop(client: le.JackdawAcmeClient, relay_domain: str) -> None:
+async def _renewal_loop(
+    client: le.JackdawAcmeClient,
+    relay_domain: str,
+    ssl_context: ssl.SSLContext | None,
+) -> None:
     """Renew the relay's own TLS cert when fewer than 30 days remain.
 
-    Checks once per day.  Skipped automatically in local-dev mode (when
-    relay_domain contains a scheme) because _bootstrap_relay_cert is a no-op
-    there.
+    Checks once per day.  After a successful renewal the live *ssl_context*
+    is reloaded in place so new handshakes present the new cert without a
+    restart.  In local-dev / plain-HTTP mode no cert is ever on disk, so the
+    expiry check never fires.
     """
     while True:
         await asyncio.sleep(86400)  # 24 h
         days = await asyncio.to_thread(_relay_cert_days_remaining)
-        if days is not None and days < 30:
-            log.info("Relay cert expires in %.1f days — renewing", days)
-            await _bootstrap_relay_cert(client, relay_domain, force=True)
+        if days is None or days >= _RENEW_THRESHOLD_DAYS:
+            continue
+        log.info("Relay cert expires in %.1f days — renewing", days)
+        try:
+            await _issue_relay_cert(client, relay_domain)
+        except Exception:
+            log.exception("Relay cert renewal failed — retrying in 24 h")
+            continue
+        if ssl_context is not None:
+            ssl_dir = Path(get_settings().ssl_dir)
+            await asyncio.to_thread(
+                ssl_context.load_cert_chain,
+                ssl_dir / _CERT_FILENAME,
+                ssl_dir / _KEY_FILENAME,
+            )
+            log.info("Live TLS context reloaded with the renewed certificate")
 
 
 @asynccontextmanager
@@ -214,14 +206,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.le_client = client
 
     prune_task = asyncio.create_task(_prune_loop())
-    renewal_task = asyncio.create_task(_renewal_loop(client, settings.relay_domain))
-    bootstrap_task = asyncio.create_task(_bootstrap_relay_cert(client, settings.relay_domain))
+    # The serve entry-point (jackdaw.serve) stashes the live SSLContext on
+    # app.state before starting uvicorn; absent (tests, plain-HTTP mode) the
+    # renewal loop skips the in-place reload.
+    ssl_context = getattr(app.state, "relay_ssl_context", None)
+    renewal_task = asyncio.create_task(_renewal_loop(client, settings.relay_domain, ssl_context))
 
     yield
 
     prune_task.cancel()
     renewal_task.cancel()
-    bootstrap_task.cancel()
 
 
 # ---------------------------------------------------------------------------

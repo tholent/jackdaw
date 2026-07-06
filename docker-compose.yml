@@ -1,41 +1,16 @@
 services:
-  init-certs:
-    image: alpine/openssl
-    volumes:
-      - jackdaw-data:/data
-      - ./nginx/bootstrap:/bootstrap:ro
-    # alpine/openssl sets ENTRYPOINT ["openssl"], so override it to run the
-    # bootstrap script through a shell instead of passing it to openssl.
-    entrypoint: ["/bin/sh"]
-    command: ["/bootstrap/generate-selfsigned.sh"]
-    # Run to completion before nginx starts.
-
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "443:443"
-      - "80:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/reload-on-cert-change.sh:/reload-on-cert-change.sh:ro
-      - jackdaw-data:/data:ro
-    # Jackdaw writes the real LE cert to the shared volume but runs in another
-    # container and can't signal nginx; this wrapper reloads nginx when the
-    # cert changes. The stock entrypoint (envsubst etc.) still runs first.
-    command: ["/bin/sh", "/reload-on-cert-change.sh"]
-    depends_on:
-      init-certs:
-        condition: service_completed_successfully
-      jackdaw:
-        condition: service_healthy
-
   jackdaw:
     image: ghcr.io/tholent/jackdaw:${JACKDAW_VERSION:-latest}
     # `build` lets `docker compose build` produce the image locally; deployments
     # can `docker compose pull` the published release instead.
     build: .
+    ports:
+      - "443:443"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      # Liveness listener on 127.0.0.1:8000 (see src/jackdaw/serve.py) — it
+      # answers from process start, including while the first-boot Let's
+      # Encrypt issuance still has the public HTTPS listener offline.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -62,8 +37,6 @@ services:
       - LE_ACCOUNT_KEY_PATH=${LE_ACCOUNT_KEY_PATH:-/data/le_account.key}
     volumes:
       - jackdaw-data:/data
-    expose:
-      - "8000"
 
 volumes:
   jackdaw-data:
