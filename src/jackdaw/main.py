@@ -76,9 +76,28 @@ def _write_relay_cert(cert_path: Path, key_path: Path, pem_chain: str, key_pem: 
 
 
 def _relay_cert_exists() -> bool:
-    """Return True if both cert and key files are already present."""
+    """Return True if a real, CA-issued relay cert is already present.
+
+    The init-certs container writes a self-signed placeholder to the same
+    fullchain.pem/privkey.pem paths so nginx can start before Jackdaw has a
+    real cert.  That placeholder must *not* count as "present" here, or the
+    first-boot bootstrap would skip LE issuance entirely.  A self-signed cert
+    has issuer == subject; a Let's Encrypt cert is issued by LE, so the two
+    differ — we use that to tell them apart.
+    """
     ssl_dir = Path(get_settings().ssl_dir)
-    return (ssl_dir / _CERT_FILENAME).exists() and (ssl_dir / _KEY_FILENAME).exists()
+    cert_path = ssl_dir / _CERT_FILENAME
+    key_path = ssl_dir / _KEY_FILENAME
+    if not cert_path.exists() or not key_path.exists():
+        return False
+    try:
+        from cryptography import x509
+
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    except Exception:
+        log.warning("Could not parse relay cert; treating as absent", exc_info=True)
+        return False
+    return cert.issuer != cert.subject
 
 
 def _relay_cert_days_remaining() -> float | None:
