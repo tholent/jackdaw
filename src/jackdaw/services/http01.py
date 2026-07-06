@@ -87,14 +87,21 @@ def _resolve_and_check(hostname: str) -> str:
     if not results:
         raise Http01ValidationError(f"No DNS records found for {hostname!r}")
 
-    chosen_ip: str | None = None
-    for _family, _type, _proto, _canonname, sockaddr in results:
+    # Every resolved address must clear the SSRF check — this is the DNS-rebinding
+    # defense, so we cannot short-circuit on the first usable one.  Among those
+    # that pass, prefer IPv4 (per the docstring), falling back to IPv6.
+    chosen_ipv4: str | None = None
+    chosen_any: str | None = None
+    for family, _type, _proto, _canonname, sockaddr in results:
         ip = str(sockaddr[0])
         if _is_blocked(ip):
             raise Http01ValidationError(f"Domain {hostname!r} resolves to blocked address {ip!r}")
-        if chosen_ip is None:
-            chosen_ip = ip
+        if chosen_any is None:
+            chosen_any = ip
+        if family == socket.AF_INET and chosen_ipv4 is None:
+            chosen_ipv4 = ip
 
+    chosen_ip = chosen_ipv4 or chosen_any
     assert chosen_ip is not None  # guaranteed: results non-empty and all passed
     return chosen_ip
 
@@ -201,10 +208,13 @@ async def _attempt_validation(  # noqa: ASYNC109
         raise Http01ValidationError(f"Unexpected error resolving {domain!r}: {exc}") from exc
 
     # Build the URL against the pinned IP address; keep original domain as Host header.
+    # The configured challenge port must be part of the connection target — it
+    # governs where we actually connect, not just what we advertise in Host.
+    host_port = "" if port == 80 else f":{port}"
     if ":" in ip:  # IPv6 — must be bracketed
-        target = f"http://[{ip}]{url_path}"
+        target = f"http://[{ip}]{host_port}{url_path}"
     else:
-        target = f"http://{ip}{url_path}"
+        target = f"http://{ip}{host_port}{url_path}"
 
     async with httpx.AsyncClient(
         follow_redirects=False,

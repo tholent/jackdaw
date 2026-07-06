@@ -336,6 +336,83 @@ async def test_run_challenge_failure_sets_invalid(challenge_setup: dict) -> None
     assert order is not None and order.status == "invalid"
 
 
+async def test_run_challenge_waits_for_all_authz_before_ready() -> None:
+    """An order with two authorizations only becomes ready once both validate.
+
+    Multi-identifier orders are rejected at new-order, but the order-state
+    invariant must hold even if such rows exist: validating one authz must not
+    prematurely flip the whole order to ``ready``.
+    """
+    import uuid
+    from datetime import UTC, datetime
+
+    from sqlalchemy import delete
+
+    from jackdaw import worker
+    from jackdaw._util import canonical_jwk
+    from jackdaw.db.engine import AsyncSessionLocal
+
+    acct_id = f"multi-acct-{uuid.uuid4()}"
+    ord_id = f"multi-ord-{uuid.uuid4()}"
+    authz1 = f"multi-authz1-{uuid.uuid4()}"
+    authz2 = f"multi-authz2-{uuid.uuid4()}"
+
+    key = make_ec_key()
+    jwk_json = canonical_jwk(jwk_for_key(key))
+
+    async with AsyncSessionLocal() as db:
+        db.add(
+            Account(id=acct_id, public_key=jwk_json, status="valid", created_at=datetime.now(UTC))
+        )
+        db.add(
+            Order(
+                id=ord_id,
+                account_id=acct_id,
+                status="processing",
+                identifiers=json.dumps(
+                    [{"type": "dns", "value": "a.test"}, {"type": "dns", "value": "b.test"}]
+                ),
+                created_at=datetime.now(UTC),
+            )
+        )
+        for aid, ident in ((authz1, "a.test"), (authz2, "b.test")):
+            db.add(
+                Authorization(
+                    id=aid,
+                    order_id=ord_id,
+                    identifier=ident,
+                    status="pending",
+                    challenge_token="tok",
+                    created_at=datetime.now(UTC),
+                )
+            )
+        await db.commit()
+
+    try:
+        with patch("jackdaw.worker.validate_http01", new=AsyncMock(return_value=None)):
+            # First authz validated — order must stay out of "ready".
+            await worker.run_challenge(authz_id=authz1, order_id=ord_id)
+            async with AsyncSessionLocal() as db:
+                order = await db.get(Order, ord_id)
+                assert order is not None and order.status != "ready"
+
+            # Second authz validated — now all are valid, order becomes ready.
+            await worker.run_challenge(authz_id=authz2, order_id=ord_id)
+            async with AsyncSessionLocal() as db:
+                order = await db.get(Order, ord_id)
+                a1 = await db.get(Authorization, authz1)
+                a2 = await db.get(Authorization, authz2)
+                assert order is not None and order.status == "ready"
+                assert a1 is not None and a1.status == "valid"
+                assert a2 is not None and a2.status == "valid"
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(Authorization).where(Authorization.order_id == ord_id))
+            await db.execute(delete(Order).where(Order.id == ord_id))
+            await db.execute(delete(Account).where(Account.id == acct_id))
+            await db.commit()
+
+
 # ---------------------------------------------------------------------------
 # Challenge route — processing state set before task launches
 # ---------------------------------------------------------------------------
@@ -669,6 +746,45 @@ def test_resolve_and_check_multiple_ips_returns_first() -> None:
     assert ip == "192.168.1.10"
 
 
+def test_resolve_and_check_prefers_ipv4_over_ipv6() -> None:
+    """When both families resolve, the IPv4 address is preferred even if IPv6 is first."""
+    import socket
+
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [
+            (socket.AF_INET6, 1, 6, "", ("2001:db8::1", 0, 0, 0)),
+            (socket.AF_INET, 1, 6, "", ("192.168.1.10", 0)),
+        ]
+        ip = _resolve_and_check("dual.internal")
+    assert ip == "192.168.1.10"
+
+
+def test_resolve_and_check_ipv6_only_returns_ipv6() -> None:
+    """With no IPv4 record available, the IPv6 address is returned."""
+    import socket
+
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [
+            (socket.AF_INET6, 1, 6, "", ("2001:db8::1", 0, 0, 0)),
+        ]
+        ip = _resolve_and_check("v6.internal")
+    assert ip == "2001:db8::1"
+
+
+def test_resolve_and_check_blocked_ipv6_still_rejected_when_ipv4_present() -> None:
+    """Every resolved address is SSRF-checked; a blocked IPv6 fails the whole lookup
+    even when a safe IPv4 is also present (DNS-rebinding defense)."""
+    import socket
+
+    with patch("jackdaw.services.http01.socket.getaddrinfo") as mock_gai:
+        mock_gai.return_value = [
+            (socket.AF_INET, 1, 6, "", ("192.168.1.10", 0)),
+            (socket.AF_INET6, 1, 6, "", ("::1", 0, 0, 0)),  # loopback — blocked
+        ]
+        with pytest.raises(Http01ValidationError, match="blocked"):
+            _resolve_and_check("mixed.internal")
+
+
 # ---------------------------------------------------------------------------
 # _attempt_validation — production path without client_factory (lines 196-214)
 # ---------------------------------------------------------------------------
@@ -731,6 +847,61 @@ async def test_attempt_validation_production_ipv6_path() -> None:
     assert "[2001:db8::1]" in target_url
 
 
+async def test_attempt_validation_nondefault_port_in_target() -> None:
+    """A non-default CHALLENGE_HTTP_PORT must be part of the connection target URL.
+
+    Regression: previously the port only reached the Host header, so the actual
+    connection always went to :80 and any non-default port silently failed.
+    """
+    with patch(
+        "jackdaw.services.http01.asyncio.to_thread",
+        new=AsyncMock(return_value="192.168.1.1"),
+    ):
+        with patch(
+            "jackdaw.services.http01._fetch_and_compare",
+            new=AsyncMock(return_value=None),
+        ) as mock_fetch:
+            await _attempt_validation(
+                "service.internal", 8080, "/.well-known/acme-challenge/tok", "expected", 5, None
+            )
+    target_url = mock_fetch.call_args[0][1]
+    assert target_url == "http://192.168.1.1:8080/.well-known/acme-challenge/tok"
+
+
+async def test_attempt_validation_nondefault_port_ipv6_target() -> None:
+    """Non-default port must sit after the bracketed IPv6 literal in the target URL."""
+    with patch(
+        "jackdaw.services.http01.asyncio.to_thread",
+        new=AsyncMock(return_value="2001:db8::1"),
+    ):
+        with patch(
+            "jackdaw.services.http01._fetch_and_compare",
+            new=AsyncMock(return_value=None),
+        ) as mock_fetch:
+            await _attempt_validation(
+                "ipv6.internal", 8080, "/.well-known/acme-challenge/tok", "expected", 5, None
+            )
+    target_url = mock_fetch.call_args[0][1]
+    assert target_url == "http://[2001:db8::1]:8080/.well-known/acme-challenge/tok"
+
+
+async def test_attempt_validation_default_port_omitted_from_target() -> None:
+    """Port 80 must stay implicit in the target URL (no ':80' suffix)."""
+    with patch(
+        "jackdaw.services.http01.asyncio.to_thread",
+        new=AsyncMock(return_value="192.168.1.1"),
+    ):
+        with patch(
+            "jackdaw.services.http01._fetch_and_compare",
+            new=AsyncMock(return_value=None),
+        ) as mock_fetch:
+            await _attempt_validation(
+                "service.internal", 80, "/.well-known/acme-challenge/tok", "expected", 5, None
+            )
+    target_url = mock_fetch.call_args[0][1]
+    assert target_url == "http://192.168.1.1/.well-known/acme-challenge/tok"
+
+
 # ---------------------------------------------------------------------------
 # _fetch_and_compare — httpx.RequestError (lines 231-232)
 # ---------------------------------------------------------------------------
@@ -754,6 +925,104 @@ async def test_fetch_and_compare_request_error_raises() -> None:
 # ---------------------------------------------------------------------------
 # worker.process_finalize — success
 # ---------------------------------------------------------------------------
+
+
+def _make_self_signed_pem(not_after: Any) -> str:
+    """Build a self-signed leaf certificate PEM with a specific notAfter."""
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from cryptography.x509.oid import NameOID
+
+    key = generate_private_key(SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "x.test")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC) - timedelta(minutes=1))
+        .not_valid_after(not_after)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.PEM).decode()
+
+
+def test_cert_expiry_from_pem_parses_real_notafter() -> None:
+    """_cert_expiry_from_pem returns the leaf's notAfter as naive UTC."""
+    from datetime import UTC, datetime, timedelta
+
+    from jackdaw.worker import _cert_expiry_from_pem
+
+    not_after = (datetime.now(UTC) + timedelta(days=90)).replace(microsecond=0)
+    result = _cert_expiry_from_pem(_make_self_signed_pem(not_after))
+    assert result.tzinfo is None
+    assert result == not_after.replace(tzinfo=None)
+
+
+def test_cert_expiry_from_pem_falls_back_on_garbage() -> None:
+    """An unparseable chain falls back to a ~89-day naive-UTC estimate."""
+    from datetime import UTC, datetime, timedelta
+
+    from jackdaw.worker import _cert_expiry_from_pem
+
+    result = _cert_expiry_from_pem("not a certificate")
+    assert result.tzinfo is None
+    expected = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=89)
+    assert abs((result - expected).total_seconds()) < 60
+
+
+async def test_process_finalize_stores_real_cert_expiry() -> None:
+    """process_finalize must persist the leaf certificate's actual notAfter."""
+    import uuid
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import MagicMock, patch
+
+    from sqlalchemy import delete
+
+    from jackdaw import worker
+    from jackdaw.db.engine import AsyncSessionLocal
+    from jackdaw.db.models import Certificate
+
+    acct_id = f"pf-exp-acct-{uuid.uuid4()}"
+    ord_id = f"pf-exp-ord-{uuid.uuid4()}"
+    not_after = (datetime.now(UTC) + timedelta(days=90)).replace(microsecond=0)
+    pem = _make_self_signed_pem(not_after)
+
+    async with AsyncSessionLocal() as db:
+        db.add(Account(id=acct_id, public_key="{}", status="valid", created_at=datetime.now(UTC)))
+        db.add(
+            Order(
+                id=ord_id,
+                account_id=acct_id,
+                status="ready",
+                identifiers='[{"type":"dns","value":"x.test"}]',
+                created_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    try:
+        with patch("jackdaw.worker.le.order_cert", new=AsyncMock(return_value=pem)):
+            await worker.process_finalize(
+                order_id=ord_id, domain="x.test", csr_der=b"fake", acme_client=MagicMock()
+            )
+        async with AsyncSessionLocal() as db:
+            order = await db.get(Order, ord_id)
+            assert order is not None and order.cert_id is not None
+            cert = await db.get(Certificate, order.cert_id)
+            assert cert is not None
+            assert cert.expires_at == not_after.replace(tzinfo=None)
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(Certificate).where(Certificate.order_id == ord_id))
+            await db.execute(delete(Order).where(Order.id == ord_id))
+            await db.execute(delete(Account).where(Account.id == acct_id))
+            await db.commit()
 
 
 async def test_process_finalize_success_stores_cert() -> None:

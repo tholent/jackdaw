@@ -161,9 +161,7 @@ async def key_change(request: Request, db: _DB) -> JSONResponse:
     await db.commit()
     log.info("Account %s key-change complete", account_id)
 
-    import json as _json
-
-    contact = _json.loads(account.contact) if account.contact else None
+    contact = json.loads(account.contact) if account.contact else None
     return JSONResponse(
         content={
             "status": account.status,

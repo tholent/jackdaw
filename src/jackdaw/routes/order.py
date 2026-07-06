@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jackdaw._util import b64url_decode
+from jackdaw._util import b64url_decode, utcnow
 from jackdaw.config import get_settings
 from jackdaw.db.engine import get_db
 from jackdaw.db.models import Authorization, Order
@@ -36,11 +36,11 @@ _background_tasks: set[asyncio.Task[None]] = set()
 def _isoformat_utc(dt: datetime | None) -> str | None:
     """Serialize a stored UTC datetime as RFC 3339 with an explicit offset.
 
-    Every value written here is ``datetime.now(UTC)``, but SQLAlchemy's SQLite
-    ``DateTime`` column round-trips values as naive (tzinfo is not persisted).
-    ``.isoformat()`` on that naive result omits the offset entirely, which
-    real RFC 3339 parsers (e.g. Go's ``time.Parse``, used by Caddy/acmez)
-    reject outright rather than assuming UTC.
+    Timestamps are stored as naive UTC (see ``_util.utcnow``) because SQLite's
+    ``DateTime`` column does not persist tzinfo.  ``.isoformat()`` on that naive
+    result omits the offset entirely, which real RFC 3339 parsers (e.g. Go's
+    ``time.Parse``, used by Caddy/acmez) reject outright rather than assuming
+    UTC — so we re-attach the UTC offset here.
     """
     if dt is None:
         return None
@@ -56,8 +56,15 @@ def _validate_identifiers(identifiers: list[Identifier]) -> None:
     ``type="dns"`` with a non-empty value.  Catching this here avoids writing
     invalid rows that Let's Encrypt would reject later.
 
+    Multi-identifier (SAN) orders are rejected outright: the client-facing
+    HTTP-01 leg only validates and finalizes the first identifier, so a
+    multi-domain order would either be silently downgraded to a single-domain
+    certificate or rejected by Let's Encrypt when its CSR lists SANs that were
+    never authorized.  Refusing it here gives the client a clear error instead.
+
     Raises:
-        HTTPException(400): No identifiers, or one has a bad type/value.
+        HTTPException(400): No identifiers, more than one identifier, or one
+            has a bad type/value.
     """
     if not identifiers:
         raise HTTPException(
@@ -65,6 +72,17 @@ def _validate_identifiers(identifiers: list[Identifier]) -> None:
             detail={
                 "type": "urn:ietf:params:acme:error:malformed",
                 "detail": "Order must contain at least one identifier",
+            },
+        )
+    if len(identifiers) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "urn:ietf:params:acme:error:malformed",
+                "detail": (
+                    "This relay issues one domain per order; "
+                    "multi-identifier (SAN) orders are not supported"
+                ),
             },
         )
     for ident in identifiers:
@@ -92,7 +110,7 @@ async def _check_order_rate_limit(db: AsyncSession, account_id: str) -> None:
     limit = settings.order_rate_limit
     if limit <= 0:
         return
-    window_start = datetime.now(UTC) - timedelta(seconds=settings.order_rate_window)
+    window_start = utcnow() - timedelta(seconds=settings.order_rate_window)
     count = await db.scalar(
         select(func.count())
         .select_from(Order)
@@ -160,7 +178,7 @@ async def new_order(request: Request, db: _DB) -> JSONResponse:
     base = settings.relay_base_url
 
     order_id = str(uuid.uuid4())
-    expires_at = datetime.now(UTC) + timedelta(days=1)
+    expires_at = utcnow() + timedelta(days=1)
 
     db.add(
         Order(
@@ -169,7 +187,7 @@ async def new_order(request: Request, db: _DB) -> JSONResponse:
             status="pending",
             identifiers=json.dumps([i.model_dump() for i in order_req.identifiers]),
             expires_at=expires_at,
-            created_at=datetime.now(UTC),
+            created_at=utcnow(),
         )
     )
 
@@ -183,7 +201,7 @@ async def new_order(request: Request, db: _DB) -> JSONResponse:
                 identifier=ident.value,
                 status="pending",
                 challenge_token=secrets.token_urlsafe(32),
-                created_at=datetime.now(UTC),
+                created_at=utcnow(),
             )
         )
         authz_urls.append(f"{base}/acme/authz/{authz_id}")

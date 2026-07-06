@@ -132,6 +132,46 @@ def test_validate_identifiers_rejects_blank_value() -> None:
     assert exc_info.value.status_code == 400
 
 
+def test_validate_identifiers_rejects_multiple() -> None:
+    """SAN (multi-identifier) orders are not supported — reject with a malformed error."""
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_identifiers(
+            [
+                Identifier(type="dns", value="a.example.com"),
+                Identifier(type="dns", value="b.example.com"),
+            ]
+        )
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["type"] == "urn:ietf:params:acme:error:malformed"
+
+
+async def test_new_order_rejects_multiple_identifiers(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """POST /acme/new-order with two identifiers must return 400 and persist nothing."""
+    key, account_url = await _create_account(test_client, db_session)
+    nonce = await generate_nonce(db_session)
+    body = build_jws(
+        payload={
+            "identifiers": [
+                {"type": "dns", "value": "a.example.com"},
+                {"type": "dns", "value": "b.example.com"},
+            ]
+        },
+        url="https://jackdaw.test/acme/new-order",
+        nonce=nonce,
+        key=key,
+        kid=account_url,
+    )
+    resp = await test_client.post("/acme/new-order", json=body, headers=_CT)
+    assert resp.status_code == 400
+    assert "malformed" in resp.text
+
+    # Nothing should have been written for this order.
+    result = await db_session.execute(select(Order))
+    assert result.scalars().all() == []
+
+
 # ---------------------------------------------------------------------------
 # _check_order_rate_limit unit tests
 # ---------------------------------------------------------------------------
@@ -176,6 +216,42 @@ async def test_rate_limit_ignores_old_and_other_accounts(db_session: AsyncSessio
         ms.return_value.order_rate_limit = 1
         ms.return_value.order_rate_window = 604800
         await _check_order_rate_limit(db_session, "acct")  # no raise: nothing recent for acct
+
+
+async def test_rate_limit_counts_naive_created_at_at_boundary(db_session: AsyncSession) -> None:
+    """Orders stored with naive-UTC created_at must be counted correctly near the
+    window edge — the previous aware/naive mismatch made the boundary comparison
+    unreliable because SQLite compares the ISO strings lexicographically and the
+    aware ``+00:00`` suffix skewed the result."""
+    from jackdaw._util import utcnow
+
+    now = utcnow()
+    # Two orders just inside the window (naive UTC, as new_order now writes them).
+    db_session.add_all(
+        [_order("acct", now - timedelta(seconds=10)), _order("acct", now - timedelta(seconds=5))]
+    )
+    await db_session.commit()
+    with patch("jackdaw.routes.order.get_settings") as ms:
+        ms.return_value.order_rate_limit = 2
+        ms.return_value.order_rate_window = 3600
+        with pytest.raises(HTTPException) as exc_info:
+            await _check_order_rate_limit(db_session, "acct")
+    assert exc_info.value.status_code == 429
+
+
+async def test_new_order_persists_naive_created_at(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """new_order must store timezone-naive UTC timestamps (SQLite drops tzinfo)."""
+    key, account_url = await _create_account(test_client, db_session)
+    order_url, _ = await _create_order(
+        test_client, db_session, key, account_url, "test.example.com"
+    )
+    order_id = order_url.rsplit("/", 1)[-1]
+    result = await db_session.execute(select(Order).where(Order.id == order_id))
+    order = result.scalar_one()
+    assert order.created_at.tzinfo is None
+    assert order.expires_at is not None and order.expires_at.tzinfo is None
 
 
 # ---------------------------------------------------------------------------

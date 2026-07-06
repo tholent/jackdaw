@@ -1,12 +1,13 @@
 """Certificate persistence: store issued certs and retrieve them by ID."""
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from jackdaw._util import utcnow
 from jackdaw.db.models import Certificate
 
 
@@ -33,7 +34,7 @@ async def store_cert(
             id=cert_id,
             order_id=order_id,
             pem_chain=pem_chain,
-            issued_at=datetime.now(UTC),
+            issued_at=utcnow(),
             expires_at=expires_at,
         )
     )

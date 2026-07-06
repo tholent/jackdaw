@@ -2,7 +2,21 @@
 
 import base64
 import json
+from datetime import UTC, datetime
 from typing import Any
+
+
+def utcnow() -> datetime:
+    """Return the current UTC time as a *naive* ``datetime``.
+
+    Every ``DateTime`` column in the schema is timezone-naive because SQLite
+    does not persist ``tzinfo`` — a value written as aware round-trips as naive.
+    Storing and comparing naive-UTC values everywhere avoids mixing aware and
+    naive datetimes, which SQLAlchemy renders as differently-formatted strings
+    (``...+00:00`` vs none) and therefore compares incorrectly at the boundary
+    in SQLite's lexicographic datetime comparison.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def b64url_decode(s: str) -> bytes:

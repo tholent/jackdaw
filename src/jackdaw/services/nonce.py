@@ -1,7 +1,7 @@
 """Nonce lifecycle: generation, single-use consumption, and background pruning."""
 
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import cast
 
 from fastapi import HTTPException
@@ -9,19 +9,9 @@ from sqlalchemy import delete, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from jackdaw._util import utcnow as _utcnow
 from jackdaw.config import get_settings
 from jackdaw.db.models import Nonce
-
-
-def _utcnow() -> datetime:
-    """Return the current UTC time as a *naive* datetime.
-
-    Nonce ``created_at`` is a naive ``DateTime`` column, so every producer and
-    comparison uses this single helper to stay consistent (previously
-    ``generate_nonce``/``prune_nonces`` used aware values while ``consume_nonce``
-    stripped the tzinfo, relying on SQLAlchemy to silently reconcile them).
-    """
-    return datetime.now(UTC).replace(tzinfo=None)
 
 
 async def generate_nonce(db: AsyncSession) -> str:

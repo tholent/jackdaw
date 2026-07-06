@@ -2,7 +2,6 @@
 
 import json
 import uuid
-from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -10,7 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jackdaw._util import b64url_decode, canonical_jwk
+from jackdaw._util import b64url_decode, canonical_jwk, utcnow
 from jackdaw.config import get_settings
 from jackdaw.db.engine import get_db
 from jackdaw.db.models import Account
@@ -80,7 +79,7 @@ async def new_account(request: Request, db: _DB) -> JSONResponse:
             public_key=stored_key,
             contact=json.dumps(acct_req.contact) if acct_req.contact else None,
             status="valid",
-            created_at=datetime.now(UTC),
+            created_at=utcnow(),
         )
     )
     await db.commit()

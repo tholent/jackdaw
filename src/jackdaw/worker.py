@@ -15,8 +15,11 @@ the order ``valid``.  Sets the order ``invalid`` on any unrecoverable error.
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
+from sqlalchemy import select
+
+from jackdaw._util import utcnow
 from jackdaw.db.engine import AsyncSessionLocal
 from jackdaw.db.models import Account, Authorization, Order
 from jackdaw.services import le_client as le
@@ -29,6 +32,23 @@ log = logging.getLogger(__name__)
 def _s(value: str) -> str:
     """Strip newlines from user-supplied strings before logging to prevent log injection."""
     return value.replace("\n", "\\n").replace("\r", "\\r")
+
+
+def _cert_expiry_from_pem(pem_chain: str) -> datetime:
+    """Return the leaf certificate's notAfter as naive UTC.
+
+    The leaf is the first certificate in the chain.  Falls back to a
+    conservative 89-day estimate (Let's Encrypt issues 90-day certs) if the
+    chain cannot be parsed, so a stored record always carries a usable expiry.
+    """
+    try:
+        from cryptography import x509
+
+        leaf = x509.load_pem_x509_certificate(pem_chain.encode())
+        return leaf.not_valid_after_utc.replace(tzinfo=None)
+    except Exception:
+        log.warning("Could not parse issued cert expiry; using 89-day estimate", exc_info=True)
+        return utcnow() + timedelta(days=89)
 
 
 async def run_challenge(authz_id: str, order_id: str) -> None:
@@ -98,8 +118,25 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
 
         if validated:
             authz.status = "valid"
-            order.status = "ready"
-            log.info("Order %s marked ready (authz %s validated)", _s(order_id), _s(authz_id))
+            # Advance the order to "ready" only once every authorization it owns
+            # is valid.  Jackdaw rejects multi-identifier orders at new-order, so
+            # in practice this is the single authz — but checking the whole set
+            # keeps the order-state invariant correct regardless of how the rows
+            # were created.  Autoflush ensures this query sees the "valid" just
+            # assigned above.
+            result = await db.execute(
+                select(Authorization.status).where(Authorization.order_id == order_id)
+            )
+            statuses = list(result.scalars().all())
+            if all(s == "valid" for s in statuses):
+                order.status = "ready"
+                log.info("Order %s marked ready (all %d authz valid)", _s(order_id), len(statuses))
+            else:
+                log.info(
+                    "Authz %s validated; order %s still awaiting other authorizations",
+                    _s(authz_id),
+                    _s(order_id),
+                )
         else:
             authz.status = "invalid"
             order.status = "invalid"
@@ -128,14 +165,13 @@ async def process_finalize(
         csr_der:     DER-encoded CSR supplied by the ACME client.
         acme_client: Initialised ``JackdawAcmeClient`` for LE communication.
     """
-    # Mark processing so the client sees the transition when polling.
+    # The finalize route already transitioned the order to "processing" and
+    # committed before dispatching this task; just verify it still exists.
     async with AsyncSessionLocal() as db:
         order = await db.get(Order, order_id)
         if order is None:
             log.error("process_finalize: order %s not found", _s(order_id))
             return
-        order.status = "processing"
-        await db.commit()
 
     log.info("Starting LE flow for order %s (domain=%s)", _s(order_id), _s(domain))
 
@@ -162,8 +198,9 @@ async def process_finalize(
                 await db.commit()
         return
 
-    # Approximate expiry — LE issues 90-day certs; we store 89 days to be safe.
-    expires_at = datetime.now(UTC) + timedelta(days=89)
+    # Store the leaf certificate's real notAfter (falls back to an estimate only
+    # if the issued chain is unparseable).
+    expires_at = _cert_expiry_from_pem(pem_chain)
 
     async with AsyncSessionLocal() as db:
         order = await db.get(Order, order_id)
