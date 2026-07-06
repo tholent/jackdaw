@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request, Response
 from sqlalchemy import update
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from jackdaw import __version__
 from jackdaw.config import get_settings
 from jackdaw.db.engine import AsyncSessionLocal, init_db
 from jackdaw.db.models import Authorization, Order
@@ -208,7 +209,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # Application instance
 # ---------------------------------------------------------------------------
 
-app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(lifespan=lifespan, version=__version__, docs_url=None, redoc_url=None)
 
 
 class _AcmeHeaderMiddleware(BaseHTTPMiddleware):
