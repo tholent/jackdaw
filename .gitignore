@@ -35,3 +35,6 @@ coverage.xml
 
 # Claude Code session data
 .claude/
+
+# actual compose file
+compose.yml
