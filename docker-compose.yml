@@ -22,6 +22,9 @@ services:
         condition: service_healthy
 
   jackdaw:
+    image: ghcr.io/tholent/jackdaw:${JACKDAW_VERSION:-latest}
+    # `build` lets `docker compose build` produce the image locally; deployments
+    # can `docker compose pull` the published release instead.
     build: .
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
