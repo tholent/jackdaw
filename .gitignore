@@ -15,6 +15,9 @@ build/
 .env.local
 .env.*.local
 
+# Local, deployment-specific compose overrides (host networking, etc.)
+docker-compose.override.yml
+
 # Runtime data — certs, DB, LE account key
 data/
 
