@@ -26,16 +26,16 @@ import uvicorn
 
 from jackdaw.config import Settings, get_settings
 from jackdaw.dns.loader import get_provider
-from jackdaw.main import (
-    _CERT_FILENAME,
-    _KEY_FILENAME,
-    _RENEW_THRESHOLD_DAYS,
-    _issue_relay_cert,
-    _relay_cert_days_remaining,
-    _relay_cert_exists,
-    app,
-)
+from jackdaw.main import app
 from jackdaw.services import le_client as le
+from jackdaw.services.relay_cert import (
+    CERT_FILENAME,
+    KEY_FILENAME,
+    RENEW_THRESHOLD_DAYS,
+    issue_relay_cert,
+    relay_cert_days_remaining,
+    relay_cert_exists,
+)
 
 log = logging.getLogger(__name__)
 
@@ -90,9 +90,9 @@ def _start_health_listener() -> uvicorn.Server:
 
 async def _cert_days_remaining_if_usable() -> float | None:
     """Days remaining on a loadable cert/key pair, or None if absent/unusable."""
-    if not await asyncio.to_thread(_relay_cert_exists):
+    if not await asyncio.to_thread(relay_cert_exists):
         return None
-    return await asyncio.to_thread(_relay_cert_days_remaining)
+    return await asyncio.to_thread(relay_cert_days_remaining)
 
 
 async def _ensure_relay_cert(settings: Settings) -> None:
@@ -104,7 +104,7 @@ async def _ensure_relay_cert(settings: Settings) -> None:
     existing cert (the daily renewal loop keeps retrying).
     """
     days = await _cert_days_remaining_if_usable()
-    if days is not None and days >= _RENEW_THRESHOLD_DAYS:
+    if days is not None and days >= RENEW_THRESHOLD_DAYS:
         return
 
     dns_provider = get_provider(settings.dns_provider)
@@ -113,7 +113,7 @@ async def _ensure_relay_cert(settings: Settings) -> None:
     delay = _RETRY_INITIAL_S
     while True:
         try:
-            await _issue_relay_cert(client, settings.relay_domain)
+            await issue_relay_cert(client, settings.relay_domain)
             return
         except Exception:
             if days is not None and days > 0:
@@ -137,8 +137,8 @@ def _build_tls_server(settings: Settings) -> uvicorn.Server:
         app,
         host="0.0.0.0",  # noqa: S104 — the public listener; the container publishes it
         port=HTTPS_PORT,
-        ssl_certfile=str(ssl_dir / _CERT_FILENAME),
-        ssl_keyfile=str(ssl_dir / _KEY_FILENAME),
+        ssl_certfile=str(ssl_dir / CERT_FILENAME),
+        ssl_keyfile=str(ssl_dir / KEY_FILENAME),
     )
     config.load()  # builds config.ssl; Server.serve() skips re-loading
     assert config.ssl is not None

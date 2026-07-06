@@ -128,11 +128,11 @@ def test_relay_cert_exists_returns_false_when_missing(tmp_path, monkeypatch) -> 
     """_relay_cert_exists must return False when the ssl_dir is empty."""
     from unittest.mock import patch
 
-    from jackdaw.main import _relay_cert_exists
+    from jackdaw.services.relay_cert import relay_cert_exists
 
-    with patch("jackdaw.main.get_settings") as mock_settings:
+    with patch("jackdaw.services.relay_cert.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
-        assert _relay_cert_exists() is False
+        assert relay_cert_exists() is False
 
 
 def _write_cert_pair(tmp_path) -> None:
@@ -149,7 +149,7 @@ def _write_cert_pair(tmp_path) -> None:
     )
     from cryptography.x509.oid import NameOID
 
-    from jackdaw.main import _CERT_FILENAME, _KEY_FILENAME
+    from jackdaw.services.relay_cert import CERT_FILENAME, KEY_FILENAME
 
     key = generate_private_key(SECP256R1())
     now = datetime.now(UTC)
@@ -165,8 +165,8 @@ def _write_cert_pair(tmp_path) -> None:
         .not_valid_after(now + timedelta(days=90))
         .sign(key, hashes.SHA256())
     )
-    (tmp_path / _CERT_FILENAME).write_bytes(cert.public_bytes(Encoding.PEM))
-    (tmp_path / _KEY_FILENAME).write_bytes(
+    (tmp_path / CERT_FILENAME).write_bytes(cert.public_bytes(Encoding.PEM))
+    (tmp_path / KEY_FILENAME).write_bytes(
         key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
     )
 
@@ -175,51 +175,51 @@ def test_relay_cert_exists_returns_true_for_cert_pair(tmp_path) -> None:
     """A parseable cert with its key counts as present."""
     from unittest.mock import patch
 
-    from jackdaw.main import _relay_cert_exists
+    from jackdaw.services.relay_cert import relay_cert_exists
 
     _write_cert_pair(tmp_path)
 
-    with patch("jackdaw.main.get_settings") as mock_settings:
+    with patch("jackdaw.services.relay_cert.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
-        assert _relay_cert_exists() is True
+        assert relay_cert_exists() is True
 
 
 def test_relay_cert_exists_returns_false_without_key(tmp_path) -> None:
     """A cert without its private key is unusable and must not count as present."""
     from unittest.mock import patch
 
-    from jackdaw.main import _KEY_FILENAME, _relay_cert_exists
+    from jackdaw.services.relay_cert import KEY_FILENAME, relay_cert_exists
 
     _write_cert_pair(tmp_path)
-    (tmp_path / _KEY_FILENAME).unlink()
+    (tmp_path / KEY_FILENAME).unlink()
 
-    with patch("jackdaw.main.get_settings") as mock_settings:
+    with patch("jackdaw.services.relay_cert.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
-        assert _relay_cert_exists() is False
+        assert relay_cert_exists() is False
 
 
 def test_relay_cert_exists_returns_false_for_corrupt_cert(tmp_path) -> None:
     """An unparseable cert file must be treated as absent."""
     from unittest.mock import patch
 
-    from jackdaw.main import _CERT_FILENAME, _KEY_FILENAME, _relay_cert_exists
+    from jackdaw.services.relay_cert import CERT_FILENAME, KEY_FILENAME, relay_cert_exists
 
-    (tmp_path / _CERT_FILENAME).write_text("this is not a certificate")
-    (tmp_path / _KEY_FILENAME).write_text("this is not a key")
+    (tmp_path / CERT_FILENAME).write_text("this is not a certificate")
+    (tmp_path / KEY_FILENAME).write_text("this is not a key")
 
-    with patch("jackdaw.main.get_settings") as mock_settings:
+    with patch("jackdaw.services.relay_cert.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
-        assert _relay_cert_exists() is False
+        assert relay_cert_exists() is False
 
 
 def test_relay_cert_days_remaining_returns_none_when_missing(tmp_path) -> None:
     from unittest.mock import patch
 
-    from jackdaw.main import _relay_cert_days_remaining
+    from jackdaw.services.relay_cert import relay_cert_days_remaining
 
-    with patch("jackdaw.main.get_settings") as mock_settings:
+    with patch("jackdaw.services.relay_cert.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
-        assert _relay_cert_days_remaining() is None
+        assert relay_cert_days_remaining() is None
 
 
 def test_relay_cert_days_remaining_returns_float_for_valid_cert(tmp_path) -> None:
@@ -233,7 +233,7 @@ def test_relay_cert_days_remaining_returns_float_for_valid_cert(tmp_path) -> Non
     from cryptography.hazmat.primitives.serialization import Encoding
     from cryptography.x509.oid import NameOID
 
-    from jackdaw.main import _CERT_FILENAME, _relay_cert_days_remaining
+    from jackdaw.services.relay_cert import CERT_FILENAME, relay_cert_days_remaining
 
     key = generate_private_key(SECP256R1())
     now = datetime.now(UTC)
@@ -248,11 +248,11 @@ def test_relay_cert_days_remaining_returns_float_for_valid_cert(tmp_path) -> Non
         .not_valid_after(now + timedelta(days=90))
         .sign(key, hashes.SHA256())
     )
-    (tmp_path / _CERT_FILENAME).write_bytes(cert.public_bytes(Encoding.PEM))
+    (tmp_path / CERT_FILENAME).write_bytes(cert.public_bytes(Encoding.PEM))
 
-    with patch("jackdaw.main.get_settings") as mock_settings:
+    with patch("jackdaw.services.relay_cert.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
-        days = _relay_cert_days_remaining()
+        days = relay_cert_days_remaining()
 
     assert days is not None
     assert 88 < days < 91
@@ -262,24 +262,24 @@ def test_relay_cert_days_remaining_returns_none_on_corrupt_cert(tmp_path) -> Non
     """_relay_cert_days_remaining must return None when the cert file is not valid PEM."""
     from unittest.mock import patch
 
-    from jackdaw.main import _CERT_FILENAME, _relay_cert_days_remaining
+    from jackdaw.services.relay_cert import CERT_FILENAME, relay_cert_days_remaining
 
-    (tmp_path / _CERT_FILENAME).write_text("this is not a certificate")
+    (tmp_path / CERT_FILENAME).write_text("this is not a certificate")
 
-    with patch("jackdaw.main.get_settings") as mock_settings:
+    with patch("jackdaw.services.relay_cert.get_settings") as mock_settings:
         mock_settings.return_value.ssl_dir = str(tmp_path)
-        result = _relay_cert_days_remaining()
+        result = relay_cert_days_remaining()
 
     assert result is None
 
 
 def test_write_relay_cert_writes_files(tmp_path) -> None:
-    from jackdaw.main import _CERT_FILENAME, _KEY_FILENAME, _write_relay_cert
+    from jackdaw.services.relay_cert import CERT_FILENAME, KEY_FILENAME, write_relay_cert
 
-    cert_path = tmp_path / "ssl" / _CERT_FILENAME
-    key_path = tmp_path / "ssl" / _KEY_FILENAME
+    cert_path = tmp_path / "ssl" / CERT_FILENAME
+    key_path = tmp_path / "ssl" / KEY_FILENAME
 
-    _write_relay_cert(cert_path, key_path, "pem-chain-content", "key-content")
+    write_relay_cert(cert_path, key_path, "pem-chain-content", "key-content")
 
     assert cert_path.read_text() == "pem-chain-content"
     assert key_path.read_text() == "key-content"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated
 
 from cryptography import x509
 from fastapi import APIRouter, Depends, Request
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jackdaw._util import b64url_decode
 from jackdaw.db.engine import get_db
 from jackdaw.db.models import Certificate, Order
+from jackdaw.services import le_client as le
 from jackdaw.services.cert_store import serial_hex
 from jackdaw.services.jws import verify_jws
 
@@ -109,11 +110,7 @@ async def revoke_cert(request: Request, db: _DB) -> JSONResponse:
     # Forward the revocation to LE using Jackdaw's own LE account.
     le_client = request.app.state.le_client
     try:
-        directory = await le_client._get_directory()
-        revoke_payload: dict[str, Any] = {"certificate": cert_b64}
-        if reason is not None:
-            revoke_payload["reason"] = reason
-        await le_client._post(directory.revoke_cert, revoke_payload)
+        await le.revoke_cert(le_client, cert_b64, reason)
         log.info("Revoked certificate serial %x for account %s", serial, account_id)
     except Exception as exc:
         log.warning("LE revocation failed for serial %x: %s", serial, exc)

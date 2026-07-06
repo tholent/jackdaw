@@ -50,8 +50,8 @@ def test_tls_disabled_when_relay_domain_has_scheme() -> None:
 async def test_ensure_returns_immediately_when_cert_healthy() -> None:
     """A cert with more than the renewal threshold remaining needs no LE contact."""
     with (
-        patch("jackdaw.serve._relay_cert_exists", return_value=True),
-        patch("jackdaw.serve._relay_cert_days_remaining", return_value=60.0),
+        patch("jackdaw.serve.relay_cert_exists", return_value=True),
+        patch("jackdaw.serve.relay_cert_days_remaining", return_value=60.0),
         patch("jackdaw.serve.le.init_account", new_callable=AsyncMock) as init_account,
     ):
         await _ensure_relay_cert(_settings())
@@ -61,10 +61,10 @@ async def test_ensure_returns_immediately_when_cert_healthy() -> None:
 
 async def test_ensure_issues_when_cert_missing() -> None:
     with (
-        patch("jackdaw.serve._relay_cert_exists", return_value=False),
+        patch("jackdaw.serve.relay_cert_exists", return_value=False),
         patch("jackdaw.serve.get_provider"),
         patch("jackdaw.serve.le.init_account", new_callable=AsyncMock),
-        patch("jackdaw.serve._issue_relay_cert", new_callable=AsyncMock) as issue,
+        patch("jackdaw.serve.issue_relay_cert", new_callable=AsyncMock) as issue,
     ):
         await _ensure_relay_cert(_settings())
 
@@ -75,11 +75,11 @@ async def test_ensure_retries_with_backoff_until_issuance_succeeds() -> None:
     """With no usable cert, failed issuance is retried — HTTPS must not come up
     without a real certificate, so the loop only exits on success."""
     with (
-        patch("jackdaw.serve._relay_cert_exists", return_value=False),
+        patch("jackdaw.serve.relay_cert_exists", return_value=False),
         patch("jackdaw.serve.get_provider"),
         patch("jackdaw.serve.le.init_account", new_callable=AsyncMock),
         patch(
-            "jackdaw.serve._issue_relay_cert",
+            "jackdaw.serve.issue_relay_cert",
             new_callable=AsyncMock,
             side_effect=[RuntimeError("boom"), RuntimeError("boom"), None],
         ) as issue,
@@ -95,12 +95,12 @@ async def test_ensure_serves_existing_cert_when_renewal_fails() -> None:
     """A still-valid cert inside the renewal window is served even if the
     renewal attempt fails; the daily renewal loop owns the retries."""
     with (
-        patch("jackdaw.serve._relay_cert_exists", return_value=True),
-        patch("jackdaw.serve._relay_cert_days_remaining", return_value=10.0),
+        patch("jackdaw.serve.relay_cert_exists", return_value=True),
+        patch("jackdaw.serve.relay_cert_days_remaining", return_value=10.0),
         patch("jackdaw.serve.get_provider"),
         patch("jackdaw.serve.le.init_account", new_callable=AsyncMock),
         patch(
-            "jackdaw.serve._issue_relay_cert",
+            "jackdaw.serve.issue_relay_cert",
             new_callable=AsyncMock,
             side_effect=RuntimeError("boom"),
         ) as issue,
@@ -113,12 +113,12 @@ async def test_ensure_serves_existing_cert_when_renewal_fails() -> None:
 async def test_ensure_retries_when_cert_expired() -> None:
     """An expired cert is as good as none: block and retry, don't serve it."""
     with (
-        patch("jackdaw.serve._relay_cert_exists", return_value=True),
-        patch("jackdaw.serve._relay_cert_days_remaining", return_value=-1.0),
+        patch("jackdaw.serve.relay_cert_exists", return_value=True),
+        patch("jackdaw.serve.relay_cert_days_remaining", return_value=-1.0),
         patch("jackdaw.serve.get_provider"),
         patch("jackdaw.serve.le.init_account", new_callable=AsyncMock),
         patch(
-            "jackdaw.serve._issue_relay_cert",
+            "jackdaw.serve.issue_relay_cert",
             new_callable=AsyncMock,
             side_effect=[RuntimeError("boom"), None],
         ) as issue,
@@ -136,7 +136,7 @@ async def test_ensure_retries_when_cert_expired() -> None:
 
 async def test_renewal_loop_reloads_ssl_context_after_renewal(tmp_path) -> None:
     """After a successful renewal the live SSLContext is reloaded in place."""
-    from jackdaw.main import _renewal_loop
+    from jackdaw.services.relay_cert import renewal_loop
 
     ctx = Mock()
     sleep_count = 0
@@ -149,13 +149,13 @@ async def test_renewal_loop_reloads_ssl_context_after_renewal(tmp_path) -> None:
 
     with (
         patch("asyncio.sleep", side_effect=fake_sleep),
-        patch("jackdaw.main._relay_cert_days_remaining", return_value=10.0),
-        patch("jackdaw.main._issue_relay_cert", new_callable=AsyncMock) as issue,
-        patch("jackdaw.main.get_settings") as mock_settings,
+        patch("jackdaw.services.relay_cert.relay_cert_days_remaining", return_value=10.0),
+        patch("jackdaw.services.relay_cert.issue_relay_cert", new_callable=AsyncMock) as issue,
+        patch("jackdaw.services.relay_cert.get_settings") as mock_settings,
     ):
         mock_settings.return_value.ssl_dir = str(tmp_path)
         with pytest.raises(asyncio.CancelledError):
-            await _renewal_loop(Mock(), "relay.test", ctx)
+            await renewal_loop(Mock(), "relay.test", ctx)
 
     issue.assert_awaited_once()
     ctx.load_cert_chain.assert_called_once()
@@ -164,7 +164,7 @@ async def test_renewal_loop_reloads_ssl_context_after_renewal(tmp_path) -> None:
 async def test_renewal_loop_survives_failed_renewal(tmp_path) -> None:
     """A failed renewal is logged and retried next cycle — the loop must not die
     and the stale context must not be reloaded."""
-    from jackdaw.main import _renewal_loop
+    from jackdaw.services.relay_cert import renewal_loop
 
     ctx = Mock()
     sleep_count = 0
@@ -177,17 +177,17 @@ async def test_renewal_loop_survives_failed_renewal(tmp_path) -> None:
 
     with (
         patch("asyncio.sleep", side_effect=fake_sleep),
-        patch("jackdaw.main._relay_cert_days_remaining", side_effect=[10.0, 60.0]),
+        patch("jackdaw.services.relay_cert.relay_cert_days_remaining", side_effect=[10.0, 60.0]),
         patch(
-            "jackdaw.main._issue_relay_cert",
+            "jackdaw.services.relay_cert.issue_relay_cert",
             new_callable=AsyncMock,
             side_effect=RuntimeError("boom"),
         ) as issue,
-        patch("jackdaw.main.get_settings") as mock_settings,
+        patch("jackdaw.services.relay_cert.get_settings") as mock_settings,
     ):
         mock_settings.return_value.ssl_dir = str(tmp_path)
         with pytest.raises(asyncio.CancelledError):
-            await _renewal_loop(Mock(), "relay.test", ctx)
+            await renewal_loop(Mock(), "relay.test", ctx)
 
     issue.assert_awaited_once()
     ctx.load_cert_chain.assert_not_called()

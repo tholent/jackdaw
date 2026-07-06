@@ -27,8 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-identifier (SAN) orders are rejected at `new-order` with a `malformed`
   problem document. This relay issues one domain per order; such orders were
   previously accepted but silently downgraded to the first identifier.
+- **Database migrations now run via Alembic** at startup, replacing the
+  hand-rolled column/index reconciliation. Fresh databases are created at the
+  baseline revision; databases from an earlier release are reconciled and
+  stamped automatically, so no manual migration step is required.
+- `gufo-acme` is now pinned to `>=0.6,<0.7` — Jackdaw depends on several of its
+  internals, so minor bumps are adopted deliberately after testing.
 
 ### Added
+- `NONCE_MAX` setting: a safety ceiling on stored nonces guarding the
+  unauthenticated nonce endpoint.
 - `GET /version` endpoint and `jackdaw.__version__` reporting the running release.
 - `Release` GitHub Actions workflow that builds and publishes the Docker image to
   `ghcr.io/tholent/jackdaw` when a `vX.Y.Z` tag is pushed.

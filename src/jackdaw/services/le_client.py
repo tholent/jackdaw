@@ -304,6 +304,31 @@ async def init_account(dns_provider: DNSProvider) -> JackdawAcmeClient:
     return client
 
 
+async def revoke_cert(
+    client: JackdawAcmeClient,
+    cert_b64: str,
+    reason: int | None = None,
+) -> None:
+    """Forward a certificate revocation to Let's Encrypt via the relay's account.
+
+    Encapsulates the gufo-acme private-API calls (directory lookup + signed POST)
+    so route code never reaches into them — keeping all gufo internals in this
+    module, where the upstream-coupling risk is documented and contained.
+
+    Args:
+        client:   Initialised ``JackdawAcmeClient``.
+        cert_b64: base64url-encoded DER certificate, as received from the client.
+        reason:   Optional RFC 5280 revocation reason code.
+    """
+    # gufo's AcmeDirectory is an internal, loosely-typed structure; treat it as
+    # Any (consistent with the module override for gufo internals).
+    directory: Any = await client._get_directory()
+    payload: dict[str, Any] = {"certificate": cert_b64}
+    if reason is not None:
+        payload["reason"] = reason
+    await client._post(directory.revoke_cert, payload)
+
+
 async def order_cert(
     client: JackdawAcmeClient,
     domain: str,

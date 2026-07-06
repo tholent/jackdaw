@@ -23,7 +23,7 @@ from gufo.acme.error import (
     AcmeUnauthorizedError,
 )
 from httpx import AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw.db.engine import AsyncSessionLocal
@@ -211,42 +211,3 @@ async def test_get_order_omits_error_when_absent(
     )
     assert resp.status_code == 200
     assert "error" not in resp.json()
-
-
-# ---------------------------------------------------------------------------
-# idempotent error-column migration
-# ---------------------------------------------------------------------------
-
-
-async def test_ensure_columns_adds_missing_error_column() -> None:
-    """_ensure_columns adds `orders.error` to a legacy table lacking it, idempotently."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-    from sqlalchemy.pool import StaticPool
-
-    from jackdaw.db.engine import _ensure_columns
-
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with engine.begin() as conn:
-        # Legacy orders table without the `error` column.
-        await conn.execute(
-            text("CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, identifiers TEXT)")
-        )
-        await conn.execute(
-            text("INSERT INTO orders (id, status, identifiers) VALUES ('o1', 'invalid', '[]')")
-        )
-
-        cols_before = {row[1] for row in await conn.execute(text("PRAGMA table_info(orders)"))}
-        assert "error" not in cols_before
-
-        await _ensure_columns(conn)
-        cols_after = {row[1] for row in await conn.execute(text("PRAGMA table_info(orders)"))}
-        assert "error" in cols_after
-
-        # Running again is a no-op (no duplicate-column error).
-        await _ensure_columns(conn)
-
-    await engine.dispose()

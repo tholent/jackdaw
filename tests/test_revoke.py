@@ -121,6 +121,40 @@ async def test_revoke_cert_success(test_client: AsyncClient, db_session: AsyncSe
     mock_le._post.assert_awaited_once()
 
 
+async def test_le_revoke_cert_wraps_private_calls() -> None:
+    """le.revoke_cert issues the signed POST to the directory's revoke endpoint."""
+    from jackdaw.services import le_client as le
+
+    mock_dir = MagicMock()
+    mock_dir.revoke_cert = "https://ca.example/acme/revoke-cert"
+    client = MagicMock()
+    client._get_directory = AsyncMock(return_value=mock_dir)
+    client._post = AsyncMock(return_value=None)
+
+    await le.revoke_cert(client, "cert-b64", reason=4)
+
+    client._post.assert_awaited_once_with(
+        "https://ca.example/acme/revoke-cert", {"certificate": "cert-b64", "reason": 4}
+    )
+
+
+async def test_le_revoke_cert_omits_reason_when_none() -> None:
+    """With no reason, the payload carries only the certificate."""
+    from jackdaw.services import le_client as le
+
+    mock_dir = MagicMock()
+    mock_dir.revoke_cert = "https://ca.example/acme/revoke-cert"
+    client = MagicMock()
+    client._get_directory = AsyncMock(return_value=mock_dir)
+    client._post = AsyncMock(return_value=None)
+
+    await le.revoke_cert(client, "cert-b64")
+
+    client._post.assert_awaited_once_with(
+        "https://ca.example/acme/revoke-cert", {"certificate": "cert-b64"}
+    )
+
+
 def test_serial_hex_format() -> None:
     """serial_hex renders an int as lowercase hex with no prefix."""
     from jackdaw.services.cert_store import serial_hex

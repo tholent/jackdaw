@@ -383,6 +383,21 @@ uv run mypy src/
 
 CI runs all three on every push.
 
+**Database migrations:**
+
+The schema is managed by Alembic and migrated automatically at startup — fresh
+databases are created at the latest revision, and databases from an earlier
+release are reconciled and stamped on first boot, so there is no manual step.
+To add a migration after changing the models:
+
+```bash
+uv run alembic -c alembic.ini -x url=sqlite:///data/relay.db \
+  revision --autogenerate -m "describe change"
+```
+
+Review the generated file under `src/jackdaw/migrations/versions/` before
+committing (SQLite alters run in batch mode).
+
 ## Security notes
 
 - **Runs as an unprivileged user.** The container runs as the non-root
