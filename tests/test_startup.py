@@ -158,8 +158,8 @@ def _write_cert_pair(tmp_path, *, self_signed: bool) -> None:
     key = generate_private_key(SECP256R1())
     now = datetime.now(UTC)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "relay.test")])
-    issuer = subject if self_signed else x509.Name(
-        [x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")]
+    issuer = (
+        subject if self_signed else x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
     )
     cert = (
         x509.CertificateBuilder()
