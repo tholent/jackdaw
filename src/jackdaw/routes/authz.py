@@ -30,8 +30,15 @@ async def get_authz(authz_id: str, request: Request, db: _DB) -> JSONResponse:
     settings = get_settings()
     base = settings.relay_base_url
 
+    # RFC 8555 §7.1.6: "processing" is a legal *challenge* status but not a
+    # legal *authorization* status (only pending/valid/invalid/deactivated/
+    # expired/revoked are). Internally we reuse authz.status to track both,
+    # so map it back to "pending" for the authorization object itself while
+    # the nested challenge still reports the real "processing" state.
+    authz_status = "pending" if authz.status == "processing" else authz.status
+
     body = AuthzResponse(
-        status=authz.status,
+        status=authz_status,
         identifier=Identifier(type="dns", value=authz.identifier),
         challenges=[
             ChallengeObject(

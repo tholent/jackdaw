@@ -396,6 +396,62 @@ async def test_challenge_route_returns_processing(
     assert resp.json()["status"] == "processing"
 
 
+async def test_authz_route_maps_processing_to_pending(
+    test_client: Any, db_session: AsyncSession
+) -> None:
+    """GET /acme/authz/{id} must never report status=processing on the authorization
+    itself (RFC 8555 §7.1.6 only allows it on the nested challenge) — a real ACME
+    client (e.g. Caddy/acmez) rejects "processing" as an authorization status."""
+    from httpx import AsyncClient
+
+    assert isinstance(test_client, AsyncClient)
+
+    from datetime import UTC, datetime
+
+    from jackdaw._util import canonical_jwk
+    from jackdaw.db.models import Account, Authorization, Order
+
+    key = make_ec_key()
+    jwk_json = canonical_jwk(jwk_for_key(key))
+    account = Account(
+        id="authzproc-acct", public_key=jwk_json, status="valid", created_at=datetime.now(UTC)
+    )
+    order = Order(
+        id="authzproc-ord",
+        account_id="authzproc-acct",
+        status="processing",
+        identifiers=json.dumps([{"type": "dns", "value": "svc.internal"}]),
+        created_at=datetime.now(UTC),
+    )
+    authz = Authorization(
+        id="authzproc-authz",
+        order_id="authzproc-ord",
+        identifier="svc.internal",
+        status="processing",
+        challenge_token="authzproc-token",
+        created_at=datetime.now(UTC),
+    )
+    db_session.add_all([account, order, authz])
+    await db_session.commit()
+
+    authz_url = "https://jackdaw.test/acme/authz/authzproc-authz"
+    nonce = await generate_nonce(db_session)
+    body = build_jws(
+        payload=None,
+        url=authz_url,
+        nonce=nonce,
+        key=key,
+        kid="https://jackdaw.test/acme/account/authzproc-acct",
+    )
+
+    resp = await test_client.post("/acme/authz/authzproc-authz", json=body, headers=_CT)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "pending"
+    assert data["challenges"][0]["status"] == "processing"
+
+
 # ---------------------------------------------------------------------------
 # worker.run_challenge — error paths (authz/order not found, no token, no account)
 # ---------------------------------------------------------------------------
