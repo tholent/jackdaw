@@ -175,6 +175,13 @@ complete reference.
 | `PORKBUN_API_KEY` | Porkbun | — | Porkbun API key |
 | `PORKBUN_SECRET_API_KEY` | Porkbun | — | Porkbun secret API key |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare | — | Cloudflare API token |
+| `AWS_ACCESS_KEY_ID` | Route 53 | — | AWS access key ID |
+| `AWS_SECRET_ACCESS_KEY` | Route 53 | — | AWS secret access key |
+| `AWS_SESSION_TOKEN` | No | — | AWS session token (for temporary IAM credentials) |
+| `NAMECHEAP_API_USER` | Namecheap | — | Namecheap API user |
+| `NAMECHEAP_API_KEY` | Namecheap | — | Namecheap API key |
+| `NAMECHEAP_CLIENT_IP` | Namecheap | — | Whitelisted client IP for Namecheap API access |
+| `NAMECHEAP_USERNAME` | No | `NAMECHEAP_API_USER` | Namecheap account username |
 | `LE_DIRECTORY` | No | LE production | Let's Encrypt directory URL |
 | `DNS_PROPAGATION_WAIT` | No | `30` | Seconds to wait after setting TXT record |
 | `ALLOWED_DOMAINS` | No | _(all)_ | Comma-separated base domains for extra restriction; HTTP-01 proof is always required |
@@ -204,6 +211,35 @@ ALLOWED_DOMAINS=example.com,example.org
 
 Requests for domains outside the allowlist are rejected with an ACME
 `rejectedIdentifier` error.
+
+### Rate limiting
+
+By default any authorized client can create unlimited orders. To guard against
+exhausting Let's Encrypt's own [rate limits](#security-notes), set a per-account
+cap:
+
+```bash
+ORDER_RATE_LIMIT=50        # max orders per account within the window
+ORDER_RATE_WINDOW=604800   # window in seconds (default: 7 days)
+```
+
+When an account exceeds the cap, further orders are rejected with an ACME
+`rateLimited` error (HTTP 429). `ORDER_RATE_LIMIT=0` (the default) disables the
+check.
+
+### Multi-label TLDs
+
+Jackdaw derives the DNS zone for a domain from its last two labels
+(`sub.example.com` → `example.com`). For domains registered under a multi-label
+public suffix — e.g. `example.co.uk` — list the apex zones explicitly so the
+`_acme-challenge` record is written to the correct zone:
+
+```bash
+DNS_ZONE_OVERRIDES=example.co.uk,example.com.au
+```
+
+The longest configured zone a domain falls under wins; domains matching no
+override fall back to the last-two-labels heuristic.
 
 ### Using Let's Encrypt staging
 
@@ -350,5 +386,6 @@ CI runs all three on every push.
   keypair and send only a CSR — this is a fundamental ACME property that the
   relay preserves.
 - **Let's Encrypt rate limits.** LE enforces 50 certificates per registered
-  domain per week. In a homelab context this is unlikely to be reached, but
-  it will surface as a clear error in the Jackdaw logs if it is.
+  domain per week. In a homelab context this is unlikely to be reached, and it
+  surfaces as a clear error in the Jackdaw logs if it is. To proactively cap
+  issuance per account, set `ORDER_RATE_LIMIT` (see [Rate limiting](#rate-limiting)).
