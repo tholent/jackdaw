@@ -4,7 +4,10 @@ services:
     volumes:
       - jackdaw-data:/data
       - ./nginx/bootstrap:/bootstrap:ro
-    command: sh /bootstrap/generate-selfsigned.sh
+    # alpine/openssl sets ENTRYPOINT ["openssl"], so override it to run the
+    # bootstrap script through a shell instead of passing it to openssl.
+    entrypoint: ["/bin/sh"]
+    command: ["/bootstrap/generate-selfsigned.sh"]
     # Run to completion before nginx starts.
 
   nginx:
