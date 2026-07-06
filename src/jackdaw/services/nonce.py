@@ -13,6 +13,17 @@ from jackdaw.config import get_settings
 from jackdaw.db.models import Nonce
 
 
+def _utcnow() -> datetime:
+    """Return the current UTC time as a *naive* datetime.
+
+    Nonce ``created_at`` is a naive ``DateTime`` column, so every producer and
+    comparison uses this single helper to stay consistent (previously
+    ``generate_nonce``/``prune_nonces`` used aware values while ``consume_nonce``
+    stripped the tzinfo, relying on SQLAlchemy to silently reconcile them).
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 async def generate_nonce(db: AsyncSession) -> str:
     """Create and persist a cryptographically random nonce.
 
@@ -20,7 +31,7 @@ async def generate_nonce(db: AsyncSession) -> str:
         The nonce value (URL-safe base64, 32 bytes of entropy).
     """
     value = secrets.token_urlsafe(32)
-    db.add(Nonce(value=value, used=False, created_at=datetime.now(UTC)))
+    db.add(Nonce(value=value, used=False, created_at=_utcnow()))
     await db.commit()
     return value
 
@@ -39,7 +50,7 @@ async def consume_nonce(value: str, db: AsyncSession) -> None:
         HTTPException(400): Nonce not found, already used, or past TTL.
     """
     # created_at is stored as naive UTC; compute cutoff as naive UTC too.
-    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=get_settings().nonce_ttl)
+    cutoff = _utcnow() - timedelta(seconds=get_settings().nonce_ttl)
     cursor = cast(
         CursorResult[tuple[()]],
         await db.execute(
@@ -58,6 +69,6 @@ async def prune_nonces(db: AsyncSession) -> None:
 
     Called periodically by a background task; safe to run concurrently.
     """
-    cutoff = datetime.now(UTC) - timedelta(seconds=get_settings().nonce_ttl)
+    cutoff = _utcnow() - timedelta(seconds=get_settings().nonce_ttl)
     await db.execute(delete(Nonce).where(Nonce.created_at < cutoff))
     await db.commit()
