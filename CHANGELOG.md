@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Container runs as a non-root user.** The image now creates and runs as the
+  unprivileged `jackdaw` user, with only the `NET_BIND_SERVICE` capability added
+  in compose so it can still bind port 443. Existing deployments must fix the
+  ownership of a previously root-owned `/data` volume once — see the Security
+  notes in the README.
+
+### Fixed
+- `CHALLENGE_HTTP_PORT` is now honored when validating HTTP-01 challenges;
+  previously the configured port only reached the `Host` header and the
+  connection always went to port 80.
+- Certificate `expires_at` now reflects the issued leaf's real `notAfter`
+  instead of a fixed 89-day estimate.
+- HTTP-01 validation now prefers an IPv4 address (falling back to IPv6) as
+  documented, while still SSRF-checking every resolved address.
+
+### Changed
+- Multi-identifier (SAN) orders are rejected at `new-order` with a `malformed`
+  problem document. This relay issues one domain per order; such orders were
+  previously accepted but silently downgraded to the first identifier.
+
 ### Added
 - `GET /version` endpoint and `jackdaw.__version__` reporting the running release.
 - `Release` GitHub Actions workflow that builds and publishes the Docker image to

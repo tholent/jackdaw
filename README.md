@@ -197,6 +197,7 @@ complete reference.
 | `DNS_ZONE_OVERRIDES` | No | _(none)_ | Comma-separated apex zones for multi-label TLDs (e.g. `example.co.uk`) |
 | `ORDER_RATE_LIMIT` | No | `0` | Max orders per account within the window; `0` disables |
 | `ORDER_RATE_WINDOW` | No | `604800` | Rate-limit window in seconds (default 7 days) |
+| `NONCE_MAX` | No | `10000` | Safety ceiling on stored nonces; past it the relay stops issuing new ones until pruning drains the backlog. `0` disables |
 
 Orders that are not finalized within **24 hours** expire and can no longer be
 completed (the client must submit a fresh order). This expiry is currently
@@ -383,6 +384,19 @@ uv run mypy src/
 CI runs all three on every push.
 
 ## Security notes
+
+- **Runs as an unprivileged user.** The container runs as the non-root
+  `jackdaw` user and is granted only the `NET_BIND_SERVICE` capability (to bind
+  port 443). A freshly created `jackdaw-data` volume is initialised writable for
+  that user automatically. **Upgrading an existing deployment** whose `/data`
+  volume was created by an older root-running image? Its files are still
+  root-owned and the non-root process cannot write them — run a one-time
+  ownership fix before starting the new image:
+
+  ```sh
+  docker compose run --rm --user root --entrypoint \
+    chown jackdaw chown -R jackdaw:jackdaw /data
+  ```
 
 - **No client authentication.** Any client that can reach port 443 can request
   a certificate. Restrict access with firewall rules or a VPN — do not expose

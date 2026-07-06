@@ -1,11 +1,12 @@
 """Nonce lifecycle: generation, single-use consumption, and background pruning."""
 
+import logging
 import secrets
 from datetime import timedelta
 from typing import cast
 
 from fastapi import HTTPException
-from sqlalchemy import delete, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,13 +14,27 @@ from jackdaw._util import utcnow as _utcnow
 from jackdaw.config import get_settings
 from jackdaw.db.models import Nonce
 
+log = logging.getLogger(__name__)
 
-async def generate_nonce(db: AsyncSession) -> str:
+
+async def generate_nonce(db: AsyncSession) -> str | None:
     """Create and persist a cryptographically random nonce.
 
+    Enforces the ``NONCE_MAX`` safety ceiling: nonces are unauthenticated, so an
+    abusive caller could grow the table between prune cycles.  Once the stored
+    count reaches the cap, no new nonce is issued (the caller omits the header)
+    until pruning drains the backlog.
+
     Returns:
-        The nonce value (URL-safe base64, 32 bytes of entropy).
+        The nonce value (URL-safe base64, 32 bytes of entropy), or ``None`` when
+        the cap is in force and already reached.
     """
+    cap = get_settings().nonce_max
+    if cap > 0:
+        count = await db.scalar(select(func.count()).select_from(Nonce))
+        if count is not None and count >= cap:
+            log.warning("Nonce cap of %d reached; not issuing a new nonce", cap)
+            return None
     value = secrets.token_urlsafe(32)
     db.add(Nonce(value=value, used=False, created_at=_utcnow()))
     await db.commit()

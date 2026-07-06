@@ -60,6 +60,43 @@ async def test_consume_rejects_expired(db_session: AsyncSession) -> None:
     assert exc_info.value.status_code == 400
 
 
+async def test_generate_returns_none_at_cap(db_session: AsyncSession) -> None:
+    """generate_nonce returns None once the NONCE_MAX cap is reached."""
+    from unittest.mock import patch
+
+    # Pre-seed two nonce rows, then set the cap to 2.
+    db_session.add(Nonce(value="cap-a", used=False, created_at=datetime.now(UTC)))
+    db_session.add(Nonce(value="cap-b", used=False, created_at=datetime.now(UTC)))
+    await db_session.commit()
+
+    with patch("jackdaw.services.nonce.get_settings") as ms:
+        ms.return_value.nonce_max = 2
+        result = await generate_nonce(db_session)
+    assert result is None
+
+
+async def test_generate_issues_below_cap(db_session: AsyncSession) -> None:
+    """Below the cap, generate_nonce still issues a nonce."""
+    from unittest.mock import patch
+
+    with patch("jackdaw.services.nonce.get_settings") as ms:
+        ms.return_value.nonce_max = 10
+        result = await generate_nonce(db_session)
+    assert isinstance(result, str)
+
+
+async def test_cap_disabled_when_zero(db_session: AsyncSession) -> None:
+    """A cap of 0 disables the ceiling entirely."""
+    from unittest.mock import patch
+
+    db_session.add(Nonce(value="z1", used=False, created_at=datetime.now(UTC)))
+    await db_session.commit()
+    with patch("jackdaw.services.nonce.get_settings") as ms:
+        ms.return_value.nonce_max = 0
+        result = await generate_nonce(db_session)
+    assert isinstance(result, str)
+
+
 async def test_prune_removes_old_nonces(db_session: AsyncSession) -> None:
     # One old, one fresh.
     old_ts = datetime.now(UTC) - timedelta(seconds=700)

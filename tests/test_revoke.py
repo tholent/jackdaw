@@ -121,6 +121,91 @@ async def test_revoke_cert_success(test_client: AsyncClient, db_session: AsyncSe
     mock_le._post.assert_awaited_once()
 
 
+def test_serial_hex_format() -> None:
+    """serial_hex renders an int as lowercase hex with no prefix."""
+    from jackdaw.services.cert_store import serial_hex
+
+    assert serial_hex(255) == "ff"
+    assert serial_hex(0) == "0"
+    # A 160-bit value round-trips without overflow (the reason we store hex).
+    big = 2**159 + 123
+    assert int(serial_hex(big), 16) == big
+
+
+async def test_store_cert_populates_serial(db_session: AsyncSession) -> None:
+    """store_cert records the leaf's serial as hex."""
+    from jackdaw.services.cert_store import serial_hex, store_cert
+
+    pem, _ = _make_cert()
+    leaf = x509.load_pem_x509_certificate(pem.encode())
+
+    ord_id = f"ser-ord-{uuid.uuid4()}"
+    db_session.add(
+        Order(
+            id=ord_id,
+            account_id="ser-acct",
+            status="valid",
+            identifiers="[]",
+            created_at=datetime.now(UTC),
+        )
+    )
+    await db_session.commit()
+    cert_id = await store_cert(db_session, ord_id, pem, datetime.now(UTC) + timedelta(days=90))
+
+    cert = await db_session.get(Certificate, cert_id)
+    assert cert is not None
+    assert cert.serial == serial_hex(leaf.serial_number)
+
+
+async def test_revoke_cert_fast_path_by_serial(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """A cert stored with its serial is revoked via the indexed lookup (fast path)."""
+    from jackdaw.main import app
+    from jackdaw.services.cert_store import store_cert
+
+    key, account_url = await _create_account(test_client, db_session)
+    account_id = account_url.rsplit("/", 1)[-1]
+
+    pem, der_b64 = _make_cert()
+    ord_id = f"rev-fast-ord-{uuid.uuid4()}"
+    db_session.add(
+        Order(
+            id=ord_id,
+            account_id=account_id,
+            status="valid",
+            identifiers=json.dumps([{"type": "dns", "value": "test.example.internal"}]),
+            created_at=datetime.now(UTC),
+        )
+    )
+    await db_session.commit()
+    await store_cert(db_session, ord_id, pem, datetime.now(UTC) + timedelta(days=90))
+
+    nonce = await generate_nonce(db_session)
+    body = build_jws(
+        payload={"certificate": der_b64},
+        url="https://jackdaw.test/acme/revoke-cert",
+        nonce=nonce,
+        key=key,
+        kid=account_url,
+    )
+
+    mock_dir = MagicMock()
+    mock_dir.revoke_cert = "https://acme-v02.api.letsencrypt.org/acme/revoke-cert"
+    mock_le = MagicMock()
+    mock_le._get_directory = AsyncMock(return_value=mock_dir)
+    mock_le._post = AsyncMock(return_value=None)
+
+    app.state.le_client = mock_le
+    try:
+        resp = await test_client.post("/acme/revoke-cert", json=body, headers=_CT)
+    finally:
+        del app.state.le_client
+
+    assert resp.status_code == 200
+    mock_le._post.assert_awaited_once()
+
+
 async def test_revoke_cert_wrong_account(
     test_client: AsyncClient, db_session: AsyncSession
 ) -> None:

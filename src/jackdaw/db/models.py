@@ -73,6 +73,10 @@ class Certificate(Base):
     pem_chain: Mapped[str] = mapped_column(Text)
     issued_at: Mapped[datetime] = mapped_column(DateTime)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
+    # Leaf serial as lowercase hex (serials can be 160-bit, overflowing SQLite's
+    # signed-integer columns).  Indexed: revocation looks a cert up by serial.
+    # Nullable for rows written before this column existed.
+    serial: Mapped[str | None] = mapped_column(index=True)
 
 
 class Nonce(Base):

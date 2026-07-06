@@ -40,13 +40,17 @@ _INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS ix_accounts_public_key ON accounts (public_key)",
     "CREATE INDEX IF NOT EXISTS ix_nonces_created_at ON nonces (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_orders_account_id ON orders (account_id)",
+    "CREATE INDEX IF NOT EXISTS ix_certificates_serial ON certificates (serial)",
 )
 
 # Columns added after the initial release.  ``create_all`` never alters an
 # existing table, so pre-existing deployments need these applied explicitly.
 # SQLite has no ``ADD COLUMN IF NOT EXISTS``, so each is guarded by a
 # ``PRAGMA table_info`` check in ``_ensure_columns``.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("orders", "error", "TEXT"),)
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("orders", "error", "TEXT"),
+    ("certificates", "serial", "TEXT"),
+)
 
 
 @lru_cache(maxsize=1)
@@ -93,6 +97,10 @@ async def _ensure_columns(conn: Any) -> None:
     for table, column, coltype in _ADDED_COLUMNS:
         result = await conn.execute(text(f"PRAGMA table_info({table})"))
         existing = {row[1] for row in result}
+        if not existing:
+            # No columns reported → the table does not exist yet (create_all runs
+            # before this in init_db, but stay defensive); nothing to alter.
+            continue
         if column not in existing:
             await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
 

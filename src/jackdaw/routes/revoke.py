@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jackdaw._util import b64url_decode
 from jackdaw.db.engine import get_db
 from jackdaw.db.models import Certificate, Order
+from jackdaw.services.cert_store import serial_hex
 from jackdaw.services.jws import verify_jws
 
 log = logging.getLogger(__name__)
@@ -76,23 +77,31 @@ async def revoke_cert(request: Request, db: _DB) -> JSONResponse:
             status_code=400,
         )
 
-    # Find the cert in our DB by serial number (join to order for ownership check).
+    # Fast path: indexed lookup by stored serial, scoped to the caller's account
+    # (join to order for the ownership check).
     result = await db.execute(
-        select(Certificate, Order)
+        select(Certificate)
         .join(Order, Order.id == Certificate.order_id)
-        .where(Order.account_id == account_id)
+        .where(Order.account_id == account_id, Certificate.serial == serial_hex(serial))
     )
-    rows = result.all()
+    db_cert: Certificate | None = result.scalars().first()
 
-    db_cert: Certificate | None = None
-    for cert_row, _order_row in rows:
-        try:
-            if _serial_from_pem(cert_row.pem_chain) == serial:
-                db_cert = cert_row
-                break
-        except Exception as exc:
-            log.debug("Skipping cert row with unparseable PEM: %s", exc)
-            continue
+    # Fallback for legacy rows written before the serial column existed
+    # (serial IS NULL): parse their PEM to compare.  New rows never reach this.
+    if db_cert is None:
+        legacy = await db.execute(
+            select(Certificate)
+            .join(Order, Order.id == Certificate.order_id)
+            .where(Order.account_id == account_id, Certificate.serial.is_(None))
+        )
+        for cert_row in legacy.scalars().all():
+            try:
+                if _serial_from_pem(cert_row.pem_chain) == serial:
+                    db_cert = cert_row
+                    break
+            except Exception as exc:
+                log.debug("Skipping cert row with unparseable PEM: %s", exc)
+                continue
 
     if db_cert is None:
         return JSONResponse(content=_UNAUTHORIZED, status_code=403)

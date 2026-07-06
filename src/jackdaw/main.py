@@ -258,7 +258,10 @@ class _AcmeHeaderMiddleware(BaseHTTPMiddleware):
         if request.method in ("HEAD", "POST"):
             async with AsyncSessionLocal() as db:
                 nonce = await generate_nonce(db)
-            response.headers["Replay-Nonce"] = nonce
+            # generate_nonce returns None only when the NONCE_MAX cap is reached;
+            # omit the header rather than emit a bogus value.
+            if nonce is not None:
+                response.headers["Replay-Nonce"] = nonce
         return response
 
 

@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     le_account_key_path: str = "/data/le_account.key"
     ssl_dir: str = "/data/ssl"
     nonce_ttl: int = 600  # seconds; 10 minutes
+    # Safety ceiling on stored nonces.  Every HEAD/POST issues a nonce row, and
+    # nonces are unauthenticated (a client fetches one before it has an account),
+    # so an abusive caller could otherwise grow the table between prune cycles.
+    # Past this many rows the middleware stops issuing new nonces (logging a
+    # warning) until pruning drains the backlog.  ``0`` disables the cap.
+    nonce_max: int = 10000
     log_level: str = "INFO"
     # When True (production default) the serve entry-point terminates TLS
     # itself on port 443, obtaining/renewing the cert via Let's Encrypt.

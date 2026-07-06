@@ -1,14 +1,38 @@
 """Certificate persistence: store issued certs and retrieve them by ID."""
 
+import logging
 import uuid
 from datetime import datetime
 
+from cryptography import x509
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw._util import utcnow
 from jackdaw.db.models import Certificate
+
+log = logging.getLogger(__name__)
+
+
+def serial_hex(serial: int) -> str:
+    """Format a certificate serial number as lowercase hex (no prefix).
+
+    Serials can be up to 160 bits, which overflows SQLite's signed-integer
+    columns, so they are stored and matched as hex strings.  Both the writer
+    (``store_cert``) and the revocation lookup use this so the values compare.
+    """
+    return format(serial, "x")
+
+
+def _leaf_serial_hex(pem_chain: str) -> str | None:
+    """Return the leaf certificate's serial as hex, or None if unparseable."""
+    try:
+        leaf = x509.load_pem_x509_certificate(pem_chain.encode())
+        return serial_hex(leaf.serial_number)
+    except Exception:
+        log.warning("Could not parse issued cert serial; storing NULL", exc_info=True)
+        return None
 
 
 async def store_cert(
@@ -36,6 +60,7 @@ async def store_cert(
             pem_chain=pem_chain,
             issued_at=utcnow(),
             expires_at=expires_at,
+            serial=_leaf_serial_hex(pem_chain),
         )
     )
     await db.commit()
