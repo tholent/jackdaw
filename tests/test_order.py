@@ -256,6 +256,11 @@ async def test_finalize_order_ready_dispatches_task(
     body_json = resp.json()
     assert "finalize" in body_json
 
+    # RFC 8555 §7.4: a finalize response must report "processing", never the
+    # pre-finalize "ready" — real ACME clients (Caddy/acmez) treat "ready"
+    # coming back from finalize as "this order was never actually finalized".
+    assert body_json["status"] == "processing"
+
     # `expires` must be a real RFC 3339 timestamp with an explicit UTC offset.
     # order.expires_at was loaded from the DB above (naive datetime, since
     # SQLite drops tzinfo on round-trip) — real ACME clients like Caddy/acmez

@@ -265,6 +265,14 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
         raise HTTPException(status_code=400, detail="Order has no identifiers")
     domain: str = identifiers[0]["value"]
 
+    # Transition to processing now, before the background task runs, so the
+    # response reflects it immediately (RFC 8555 §7.4: a finalize response
+    # must never report "ready" — that's a precondition, not a valid reply)
+    # and a retried finalize POST for this order hits the guard above instead
+    # of launching a second concurrent real Let's Encrypt issuance.
+    order.status = "processing"
+    await db.commit()
+
     # Kick off the background worker.  We import here to avoid circular imports
     # at module load time.
     from jackdaw import worker
