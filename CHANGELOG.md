@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-06
+
 ### Security
 - **Container runs as a non-root user.** The image now creates and runs as the
   unprivileged `jackdaw` user, with only the `NET_BIND_SERVICE` capability added
