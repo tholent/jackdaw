@@ -1,6 +1,6 @@
 [project]
 name = "jackdaw"
-version = "0.3.0"
+version = "0.4.0"
 requires-python = ">=3.12"
 
 dependencies = [
@@ -44,6 +44,13 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Silence third-party deprecation noise from uvicorn's websockets usage, which
+# surfaces when a test builds a uvicorn Config. Scoped narrowly so warnings from
+# our own code are still shown.
+filterwarnings = [
+  "ignore:websockets.legacy is deprecated:DeprecationWarning",
+  "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
+]
 
 # ---------------------------------------------------------------------------
 # coverage
