@@ -8,10 +8,16 @@ WORKDIR /app
 # Copy lockfile and project metadata first for layer caching.
 COPY pyproject.toml uv.lock ./
 
-# Install runtime dependencies from lockfile — no network calls at image runtime.
-RUN uv sync --frozen --no-dev
+# Install runtime *dependencies* only (not the project itself, whose source
+# isn't present yet) so this heavy layer stays cached across source changes.
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src/ src/
+
+# Now install the project itself into the venv.  This must run after the source
+# is present: the CMD invokes the venv interpreter directly (no `uv run`), so
+# the project has to be importable without a runtime re-sync.
+RUN uv sync --frozen --no-dev
 
 # Run as an unprivileged user.  Create /data up front and hand it (and the
 # synced virtualenv under /app) to the jackdaw user: Docker seeds a freshly
