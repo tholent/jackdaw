@@ -19,23 +19,28 @@ COPY src/ src/
 # the project has to be importable without a runtime re-sync.
 RUN uv sync --frozen --no-dev
 
-# Run as an unprivileged user.  Create /data up front and hand it (and the
-# synced virtualenv under /app) to the jackdaw user: Docker seeds a freshly
-# created named volume from the ownership of the image path it mounts over, so
-# owning /data here makes the mounted volume writable without a runtime chown.
-# Binding the privileged :443 port as non-root needs the NET_BIND_SERVICE
-# capability, granted via `cap_add` in docker-compose.yml.
+# Create the unprivileged runtime user and own the app + a freshly seeded /data.
+# setpriv (from util-linux) is used by the entrypoint to drop privileges while
+# preserving CAP_NET_BIND_SERVICE (granted via `cap_add` in compose) so the
+# non-root app can still bind :443.
 RUN groupadd --system jackdaw \
     && useradd --system --gid jackdaw --home-dir /app --no-create-home jackdaw \
     && mkdir -p /data \
-    && chown -R jackdaw:jackdaw /data /app
+    && chown -R jackdaw:jackdaw /data /app \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
-USER jackdaw
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 443
-# Invoke the synced virtualenv's interpreter directly (rather than `uv run`) so
-# the runtime never needs uv's cache or network as a non-root user.
-# jackdaw.serve terminates TLS itself: it keeps the public HTTPS listener
-# offline until a real Let's Encrypt cert is on disk, then serves on 443
-# (plus a localhost-only liveness listener on 8000 for the healthcheck).
+# The container starts as root so the entrypoint can fix /data ownership
+# (idempotent), then drops to the unprivileged jackdaw user — preserving the
+# :443 bind capability — before exec'ing the CMD.  The CMD invokes the synced
+# virtualenv interpreter directly (no `uv run`), so no uv cache/network is
+# needed at runtime.  jackdaw.serve terminates TLS itself: it keeps the public
+# HTTPS listener offline until a real Let's Encrypt cert is on disk, then serves
+# on 443 (plus a localhost-only liveness listener on 8000 for the healthcheck).
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/app/.venv/bin/python", "-m", "jackdaw"]

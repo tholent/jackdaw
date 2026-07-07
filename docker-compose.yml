@@ -6,9 +6,9 @@ services:
     build: .
     ports:
       - "443:443"
-    # The container runs as an unprivileged user (see Dockerfile).  Binding the
-    # privileged :443 port therefore requires this one capability; everything
-    # else stays dropped.
+    # The entrypoint drops to an unprivileged user (see Dockerfile) but preserves
+    # this capability so the app can still bind the privileged :443 port;
+    # everything else stays dropped.
     cap_add:
       - NET_BIND_SERVICE
     healthcheck:

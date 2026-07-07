@@ -10,11 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-07-06
 
 ### Security
-- **Container runs as a non-root user.** The image now creates and runs as the
-  unprivileged `jackdaw` user, with only the `NET_BIND_SERVICE` capability added
-  in compose so it can still bind port 443. Existing deployments must fix the
-  ownership of a previously root-owned `/data` volume once — see the Security
-  notes in the README.
+- **App runs as a non-root user.** The container entrypoint starts as root only
+  to fix `/data` volume ownership (idempotent), then drops to the unprivileged
+  `jackdaw` user via `setpriv` — preserving `NET_BIND_SERVICE` (added in compose
+  via `cap_add`) so it can still bind port 443 — before running the app. An
+  existing root-owned `/data` volume is adopted automatically on the next start,
+  so no manual migration step is required.
+
+### Fixed
+- Docker image: install the project into the venv after copying its source, so
+  `python -m jackdaw` works without a runtime `uv run` re-sync (previously the
+  container died with "No module named jackdaw").
 
 ### Fixed
 - `CHALLENGE_HTTP_PORT` is now honored when validating HTTP-01 challenges;

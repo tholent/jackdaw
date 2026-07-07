@@ -400,18 +400,15 @@ committing (SQLite alters run in batch mode).
 
 ## Security notes
 
-- **Runs as an unprivileged user.** The container runs as the non-root
-  `jackdaw` user and is granted only the `NET_BIND_SERVICE` capability (to bind
-  port 443). A freshly created `jackdaw-data` volume is initialised writable for
-  that user automatically. **Upgrading an existing deployment** whose `/data`
-  volume was created by an older root-running image? Its files are still
-  root-owned and the non-root process cannot write them — run a one-time
-  ownership fix before starting the new image:
-
-  ```sh
-  docker compose run --rm --user root --entrypoint \
-    chown jackdaw chown -R jackdaw:jackdaw /data
-  ```
+- **Runs the app as an unprivileged user.** The entrypoint starts as root only
+  to fix the ownership of the `/data` volume — idempotent, and a no-op once it is
+  already correct — then drops to the non-root `jackdaw` user (via `setpriv`,
+  preserving the `NET_BIND_SERVICE` capability granted by `cap_add`) before
+  running the app, so it can still bind port 443. An existing `/data` volume
+  created by an older root-running image is therefore adopted automatically on
+  the next start, with no manual migration step. (Grant the capability in your
+  own compose file with `cap_add: [NET_BIND_SERVICE]`; in plain-HTTP mode on a
+  high port it is neither present nor needed.)
 
 - **No client authentication.** Any client that can reach port 443 can request
   a certificate. Restrict access with firewall rules or a VPN — do not expose
