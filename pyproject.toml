@@ -59,6 +59,13 @@ filterwarnings = [
 source = ["jackdaw"]
 branch = true
 relative_files = true
+# Async route handlers run inside SQLAlchemy's greenlet context (and a worker
+# thread under Starlette's TestClient). Without this, coverage.py's default
+# tracing core on Python 3.12 never sees those lines and under-reports by ~8pts
+# (routes drop to ~40-60%). Python 3.14's newer core traced them regardless,
+# which masked the gap in local dev. Keep both so measurement matches across
+# interpreter versions.
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 show_missing = true

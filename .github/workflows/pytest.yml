@@ -7,8 +7,12 @@ on:
 
 jobs:
   test:
-    name: Unit tests
+    name: Unit tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -16,6 +20,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --frozen
@@ -26,7 +31,11 @@ jobs:
           PORKBUN_API_KEY: pk1_test
           PORKBUN_SECRET_API_KEY: sk1_test
 
+      # Publish a single canonical coverage.xml for the SonarQube job. Pinned to
+      # the 3.12 baseline so the artifact name stays stable and matrix jobs don't
+      # race to overwrite it.
       - name: Upload coverage report
+        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
