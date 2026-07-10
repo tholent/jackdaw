@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from jackdaw import acme_errors
 from jackdaw._util import b64url_decode, utcnow
 from jackdaw.config import get_settings
 from jackdaw.db.engine import get_db
@@ -70,7 +71,7 @@ def _validate_identifiers(identifiers: list[Identifier]) -> None:
         raise HTTPException(
             status_code=400,
             detail={
-                "type": "urn:ietf:params:acme:error:malformed",
+                "type": acme_errors.MALFORMED,
                 "detail": "Order must contain at least one identifier",
             },
         )
@@ -78,7 +79,7 @@ def _validate_identifiers(identifiers: list[Identifier]) -> None:
         raise HTTPException(
             status_code=400,
             detail={
-                "type": "urn:ietf:params:acme:error:malformed",
+                "type": acme_errors.MALFORMED,
                 "detail": (
                     "This relay issues one domain per order; "
                     "multi-identifier (SAN) orders are not supported"
@@ -90,7 +91,7 @@ def _validate_identifiers(identifiers: list[Identifier]) -> None:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "type": "urn:ietf:params:acme:error:malformed",
+                    "type": acme_errors.MALFORMED,
                     "detail": "Each identifier must be type 'dns' with a non-empty value",
                 },
             )
@@ -120,7 +121,7 @@ async def _check_order_rate_limit(db: AsyncSession, account_id: str) -> None:
         raise HTTPException(
             status_code=429,
             detail={
-                "type": "urn:ietf:params:acme:error:rateLimited",
+                "type": acme_errors.RATE_LIMITED,
                 "detail": (
                     f"Order rate limit of {limit} per {settings.order_rate_window}s exceeded"
                 ),
@@ -146,7 +147,7 @@ def _check_domain_policy(identifiers: list[Identifier]) -> None:
             raise HTTPException(
                 status_code=403,
                 detail={
-                    "type": "urn:ietf:params:acme:error:rejectedIdentifier",
+                    "type": acme_errors.REJECTED_IDENTIFIER,
                     "detail": f"Domain {ident.value!r} is not under an allowed base domain",
                 },
             )
@@ -271,7 +272,7 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
         raise HTTPException(
             status_code=403,
             detail={
-                "type": "urn:ietf:params:acme:error:orderNotReady",
+                "type": acme_errors.ORDER_NOT_READY,
                 "detail": f"Order status is {order.status!r}, expected 'ready'",
             },
         )
