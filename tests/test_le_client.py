@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
 from cryptography.hazmat.primitives.serialization import Encoding
@@ -24,6 +25,7 @@ from jackdaw.services.le_client import (
     _apex_domain,
     _der_to_pem_csr,
     _dns01_txt_value,
+    _is_order_already_finalized,
     _load_or_create_account_key,
 )
 
@@ -222,3 +224,134 @@ async def test_new_order_keys_order_url_per_finalize(tmp_path: Path) -> None:
     assert order1.finalize != order2.finalize
     assert client._order_urls[order1.finalize] == "https://ca/order/1"
     assert client._order_urls[order2.finalize] == "https://ca/order/2"
+
+
+# ---------------------------------------------------------------------------
+# _is_order_already_finalized
+# ---------------------------------------------------------------------------
+
+
+def test_is_order_already_finalized_matches_order_not_ready() -> None:
+    from gufo.acme.error import AcmeError
+
+    exc = AcmeError(
+        '[403] urn:ietf:params:acme:error:orderNotReady Order\'s status ("valid") '
+        "is not acceptable for finalization"
+    )
+    assert _is_order_already_finalized(exc) is True
+
+
+def test_is_order_already_finalized_ignores_other_errors() -> None:
+    from gufo.acme.error import AcmeError
+
+    exc = AcmeError("[429] urn:ietf:params:acme:error:rateLimited too many requests")
+    assert _is_order_already_finalized(exc) is False
+
+
+# ---------------------------------------------------------------------------
+# JackdawAcmeClient.finalize_and_wait — idempotent recovery of a finalized order
+# ---------------------------------------------------------------------------
+
+
+def _finalize_client(tmp_path: Path) -> JackdawAcmeClient:
+    from josepy.jwa import ES256
+
+    acme_key = _load_or_create_account_key(tmp_path / "account.key")
+    client = JackdawAcmeClient(
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+        dns_provider=MagicMock(),
+        propagation_wait=0,
+        verify_ssl=False,
+        key=acme_key,
+        alg=ES256,
+    )
+    # sign()'s CSR handling is not under test here; the finalize POST is mocked.
+    client._pem_to_der = MagicMock(return_value=b"der")  # type: ignore[method-assign]
+    return client
+
+
+async def test_finalize_recovers_when_order_already_finalized(tmp_path: Path) -> None:
+    """A finalize rejected with orderNotReady (the order is already valid)
+    recovers the issued certificate by polling instead of failing."""
+    import json as _json
+
+    from gufo.acme.clients.base import AcmeOrder
+    from gufo.acme.error import AcmeError
+
+    client = _finalize_client(tmp_path)
+    finalize_url = "https://ca/order/1/finalize"
+    client._order_urls[finalize_url] = "https://ca/order/1"
+
+    valid_resp = MagicMock()
+    valid_resp.content = _json.dumps(
+        {"status": "valid", "certificate": "https://ca/cert/1"}
+    ).encode()
+    cert_resp = MagicMock()
+    cert_resp.content = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+
+    client._post = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            AcmeError(
+                '[403] urn:ietf:params:acme:error:orderNotReady Order\'s status ("valid") '
+                "is not acceptable for finalization"
+            ),
+            valid_resp,  # poll → valid
+            cert_resp,  # download certificate
+        ]
+    )
+
+    order = AcmeOrder(authorizations=[], finalize=finalize_url)
+    with patch("jackdaw.services.le_client.asyncio.sleep", new=AsyncMock()):
+        result = await client.finalize_and_wait(order, csr=b"pem")
+
+    assert result == cert_resp.content
+    # The order URL is popped so the shared map never grows.
+    assert finalize_url not in client._order_urls
+
+
+async def test_finalize_reraises_order_not_ready_without_order_url(tmp_path: Path) -> None:
+    """Without a captured order URL there is nothing to recover, so the
+    orderNotReady error propagates."""
+    from gufo.acme.clients.base import AcmeOrder
+    from gufo.acme.error import AcmeError
+
+    client = _finalize_client(tmp_path)
+    client._post = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AcmeError("[403] urn:ietf:params:acme:error:orderNotReady not ready")
+    )
+
+    order = AcmeOrder(authorizations=[], finalize="https://ca/order/1/finalize")
+    with pytest.raises(AcmeError):
+        await client.finalize_and_wait(order, csr=b"pem")
+
+
+async def test_finalize_reraises_non_order_not_ready_errors(tmp_path: Path) -> None:
+    """A different finalize failure (e.g. rate limiting) is never swallowed,
+    even when an order URL is available to poll."""
+    from gufo.acme.clients.base import AcmeOrder
+    from gufo.acme.error import AcmeError
+
+    client = _finalize_client(tmp_path)
+    finalize_url = "https://ca/order/1/finalize"
+    client._order_urls[finalize_url] = "https://ca/order/1"
+    client._post = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AcmeError("[429] urn:ietf:params:acme:error:rateLimited slow down")
+    )
+
+    order = AcmeOrder(authorizations=[], finalize=finalize_url)
+    with pytest.raises(AcmeError):
+        await client.finalize_and_wait(order, csr=b"pem")
+
+
+# ---------------------------------------------------------------------------
+# JackdawAcmeClient.domain_lock — per-domain issuance serialization
+# ---------------------------------------------------------------------------
+
+
+def test_domain_lock_is_stable_per_domain(tmp_path: Path) -> None:
+    client = _finalize_client(tmp_path)
+    lock_a = client.domain_lock("a.example.com")
+    lock_a2 = client.domain_lock("a.example.com")
+    lock_b = client.domain_lock("b.example.com")
+    assert lock_a is lock_a2
+    assert lock_a is not lock_b

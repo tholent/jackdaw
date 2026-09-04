@@ -94,6 +94,20 @@ def _der_to_pem_csr(csr_der: bytes) -> bytes:
     return csr.public_bytes(Encoding.PEM)
 
 
+def _is_order_already_finalized(exc: AcmeError) -> bool:
+    """True if *exc* is the CA refusing a finalize because the order is no
+    longer "ready".
+
+    gufo-acme raises a bare ``AcmeError`` whose message embeds the ACME error
+    type and the CA's detail (e.g. ``[403] urn:...:orderNotReady Order's status
+    ("valid") is not acceptable for finalization``).  We only recognise the
+    ``orderNotReady`` type: it means the order already moved on to "valid" or
+    "processing" (a duplicate/concurrent finalize), so polling for the issued
+    certificate is the right recovery.
+    """
+    return "orderNotReady" in str(exc)
+
+
 class JackdawAcmeClient(AcmeClient):
     """gufo-acme client that fulfils DNS-01 challenges via a ``DNSProvider``.
 
@@ -122,6 +136,19 @@ class JackdawAcmeClient(AcmeClient):
         # order (finalize URLs are unique) so concurrent orders on this shared
         # client instance never clobber each other's order URL.
         self._order_urls: dict[str, str] = {}
+        # Per-domain locks serializing issuance on this shared client (see
+        # order_cert).  The registry only grows with the number of distinct
+        # domains ever issued for — bounded and small — and locks are cheap, so
+        # entries are never reaped (reaping under contention would be racy).
+        self._domain_locks: dict[str, asyncio.Lock] = {}
+
+    def domain_lock(self, domain: str) -> asyncio.Lock:
+        """Return the issuance lock for *domain*, creating it on first use."""
+        lock = self._domain_locks.get(domain)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._domain_locks[domain] = lock
+        return lock
 
     def _get_client(self, auth: Any = None) -> HttpClient:
         return HttpClient(
@@ -168,18 +195,40 @@ class JackdawAcmeClient(AcmeClient):
         )
 
     async def finalize_and_wait(self, order: AcmeOrder, *, csr: bytes) -> bytes:
-        """Override to handle CAs that omit Location from the finalize response.
+        """Override to handle CAs that omit Location from the finalize response,
+        and to tolerate an already-finalized upstream order.
 
         RFC 8555 §7.4 says Location SHOULD be present, not MUST. Pebble omits
         it from finalize but does include it in new_order, which we capture in
         our new_order() override above.
+
+        A finalize POST can also lose a race with another issuance flow that
+        already finalized this same upstream order.  The CA then rejects the
+        second finalize with ``orderNotReady`` because the order is no longer
+        "ready" (it is "valid" or still "processing") — which is not a real
+        failure: the certificate has been, or is being, issued.  In that case
+        we fall back to polling the order and downloading the certificate
+        instead of failing the whole order.
         """
-        resp = await self._post(order.finalize, {"csr": encode_b64jose(self._pem_to_der(csr))})
+        # Pop our captured URL for this order up front, so the map never grows
+        # and so we can recover the certificate even if the finalize POST below
+        # is rejected outright.
+        stored_order_url = self._order_urls.pop(order.finalize, None)
+
+        try:
+            resp = await self._post(order.finalize, {"csr": encode_b64jose(self._pem_to_der(csr))})
+        except AcmeError as exc:
+            if _is_order_already_finalized(exc) and stored_order_url is not None:
+                log.warning(
+                    "Upstream order already finalized (%s); recovering the issued certificate",
+                    exc,
+                )
+                return await self._poll_order_for_cert(stored_order_url)
+            raise
+
         self._get_order_status(resp)
 
         location = resp.headers.get("Location", None)
-        # Pop our captured URL for this order regardless, so the map never grows.
-        stored_order_url = self._order_urls.pop(order.finalize, None)
         if location is not None:
             order_uri = location.decode()
         elif stored_order_url is not None:
@@ -194,8 +243,14 @@ class JackdawAcmeClient(AcmeClient):
                 "Finalize response missing Location header and no order URL available"
             )
 
-        # Poll until the CA marks the order valid, bounded so a stuck order
-        # cannot loop forever.
+        return await self._poll_order_for_cert(order_uri)
+
+    async def _poll_order_for_cert(self, order_uri: str) -> bytes:
+        """Poll *order_uri* until the CA marks it valid, then download the cert.
+
+        Bounded so a stuck/never-valid order cannot loop forever holding a task
+        reference and an open connection to the CA.
+        """
         await asyncio.sleep(1)
         for _ in range(_FINALIZE_POLL_ATTEMPTS):
             resp = await self._post(order_uri, None)
@@ -350,7 +405,13 @@ async def order_cert(
     """
     # gufo-acme sign() expects a PEM-format CSR; convert from DER.
     csr_pem = _der_to_pem_csr(csr_der)
-    result = await client.sign(domain, csr_pem)
+    # Serialize issuance per domain on the shared client.  Concurrent flows for
+    # the same domain would otherwise race on the shared nonce pool and the
+    # shared ``_acme-challenge`` TXT record, and could double-finalize a single
+    # upstream order.  One in-flight issuance per domain removes those hazards;
+    # different domains still issue concurrently.
+    async with client.domain_lock(domain):
+        result = await client.sign(domain, csr_pem)
     return result.decode()
 
 
