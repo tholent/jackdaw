@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 from josepy.jwk import JWK
 
+from jackdaw import acme_errors
 from jackdaw.config import Settings, get_settings
 
 log = logging.getLogger(__name__)
@@ -54,11 +55,16 @@ _BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
 
 
 class Http01ValidationError(Exception):
-    """Raised when HTTP-01 validation fails for any reason."""
+    """Raised when HTTP-01 validation fails for any reason.
 
-    def __init__(self, detail: str) -> None:
+    ``acme_type`` is the RFC 8555 §6.7 error-type URN that best classifies the
+    failure, so the caller can surface a proper problem document to the client.
+    """
+
+    def __init__(self, detail: str, *, acme_type: str = acme_errors.UNAUTHORIZED) -> None:
         super().__init__(detail)
         self.detail = detail
+        self.acme_type = acme_type
 
 
 def _is_blocked(ip_str: str) -> bool:
@@ -82,10 +88,14 @@ def _resolve_and_check(hostname: str) -> str:
     try:
         results = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except OSError as exc:
-        raise Http01ValidationError(f"DNS resolution failed for {hostname!r}: {exc}") from exc
+        raise Http01ValidationError(
+            f"DNS resolution failed for {hostname!r}: {exc}", acme_type=acme_errors.DNS
+        ) from exc
 
     if not results:
-        raise Http01ValidationError(f"No DNS records found for {hostname!r}")
+        raise Http01ValidationError(
+            f"No DNS records found for {hostname!r}", acme_type=acme_errors.DNS
+        )
 
     # Every resolved address must clear the SSRF check — this is the DNS-rebinding
     # defense, so we cannot short-circuit on the first usable one.  Among those
@@ -95,7 +105,10 @@ def _resolve_and_check(hostname: str) -> str:
     for family, _type, _proto, _canonname, sockaddr in results:
         ip = str(sockaddr[0])
         if _is_blocked(ip):
-            raise Http01ValidationError(f"Domain {hostname!r} resolves to blocked address {ip!r}")
+            raise Http01ValidationError(
+                f"Domain {hostname!r} resolves to blocked address {ip!r}",
+                acme_type=acme_errors.DNS,
+            )
         if chosen_any is None:
             chosen_any = ip
         if family == socket.AF_INET and chosen_ipv4 is None:
@@ -205,7 +218,9 @@ async def _attempt_validation(  # noqa: ASYNC109
     except Http01ValidationError:
         raise
     except Exception as exc:
-        raise Http01ValidationError(f"Unexpected error resolving {domain!r}: {exc}") from exc
+        raise Http01ValidationError(
+            f"Unexpected error resolving {domain!r}: {exc}", acme_type=acme_errors.DNS
+        ) from exc
 
     # Build the URL against the pinned IP address; keep original domain as Host header.
     # The configured challenge port must be part of the connection target — it
@@ -236,10 +251,13 @@ async def _fetch_and_compare(  # noqa: ASYNC109
         resp = await client.get(url)
     except httpx.TimeoutException as exc:
         raise Http01ValidationError(
-            f"HTTP-01 request timed out for {domain!r} after {request_timeout}s"
+            f"HTTP-01 request timed out for {domain!r} after {request_timeout}s",
+            acme_type=acme_errors.CONNECTION,
         ) from exc
     except httpx.RequestError as exc:
-        raise Http01ValidationError(f"HTTP-01 request failed for {domain!r}: {exc}") from exc
+        raise Http01ValidationError(
+            f"HTTP-01 request failed for {domain!r}: {exc}", acme_type=acme_errors.CONNECTION
+        ) from exc
 
     if resp.status_code != 200:
         raise Http01ValidationError(

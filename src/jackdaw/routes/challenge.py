@@ -72,6 +72,6 @@ async def acknowledge_challenge(authz_id: str, request: Request, db: _DB) -> JSO
         token=authz.challenge_token or "",
     )
     return JSONResponse(
-        content=body.model_dump(),
+        content=body.model_dump(exclude_none=True),
         headers={"Link": f'<{base}/acme/authz/{authz_id}>;rel="up"'},
     )

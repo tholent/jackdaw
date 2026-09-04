@@ -112,6 +112,9 @@ class ChallengeObject(BaseModel):
     url: str
     status: str
     token: str
+    # RFC 8555 §7.1.6 problem document, present only on a failed ('invalid')
+    # challenge so the client learns why validation failed.
+    error: dict[str, Any] | None = None
 
 
 class AuthzResponse(BaseModel):

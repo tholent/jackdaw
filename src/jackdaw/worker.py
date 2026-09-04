@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
+from jackdaw import acme_errors
 from jackdaw._util import utcnow
 from jackdaw.db.engine import AsyncSessionLocal
 from jackdaw.db.models import Account, Authorization, Order
@@ -76,6 +77,12 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
         if authz.challenge_token is None:
             log.error("run_challenge: authz %s has no challenge token", _s(authz_id))
             authz.status = "invalid"
+            authz.error = json.dumps(
+                {
+                    "type": acme_errors.SERVER_INTERNAL,
+                    "detail": "Authorization has no challenge token",
+                }
+            )
             order.status = "invalid"
             await db.commit()
             return
@@ -87,6 +94,12 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
                 "run_challenge: account %s not found for order %s", order.account_id, order_id
             )
             authz.status = "invalid"
+            authz.error = json.dumps(
+                {
+                    "type": acme_errors.SERVER_INTERNAL,
+                    "detail": "Account for this authorization no longer exists",
+                }
+            )
             order.status = "invalid"
             await db.commit()
             return
@@ -97,15 +110,21 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
 
     log.info("Starting HTTP-01 validation for %s (authz %s)", _s(domain), _s(authz_id))
 
+    error_problem: dict[str, str] | None = None
     try:
         await validate_http01(domain, token, expected)
         validated = True
         log.info("HTTP-01 validation succeeded for %s", domain)
     except Http01ValidationError as exc:
         validated = False
+        error_problem = {"type": exc.acme_type, "detail": exc.detail}
         log.warning("HTTP-01 validation failed for %s: %s", domain, exc.detail)
     except Exception:
         validated = False
+        error_problem = {
+            "type": acme_errors.SERVER_INTERNAL,
+            "detail": "Unexpected error during HTTP-01 validation",
+        }
         log.exception("Unexpected error during HTTP-01 validation for %s", domain)
 
     async with AsyncSessionLocal() as db:
@@ -139,6 +158,7 @@ async def run_challenge(authz_id: str, order_id: str) -> None:
                 )
         else:
             authz.status = "invalid"
+            authz.error = json.dumps(error_problem) if error_problem else None
             order.status = "invalid"
             log.warning("Order %s marked invalid (authz %s failed)", _s(order_id), _s(authz_id))
 

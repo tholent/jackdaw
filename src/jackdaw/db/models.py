@@ -61,6 +61,10 @@ class Authorization(Base):
     challenge_token: Mapped[str | None] = mapped_column()
     le_authz_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime)
+    # JSON problem document (RFC 8555 §7.1.6) set when HTTP-01 validation fails,
+    # so the client learns why the authorization became 'invalid' instead of
+    # seeing an empty problem.  NULL while pending or on success.
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class Certificate(Base):

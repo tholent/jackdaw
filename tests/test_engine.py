@@ -43,9 +43,10 @@ def test_migrations_fresh_database(tmp_path) -> None:
         assert "alembic_version" in tables
         assert "serial" in _cols(engine, "certificates")
         assert "error" in _cols(engine, "orders")
+        assert "error" in _cols(engine, "authorizations")
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        assert version == "0001_initial"
+        assert version == "0002_authz_error"
     finally:
         engine.dispose()
 
@@ -69,10 +70,11 @@ def test_migrations_pre_alembic_database(tmp_path) -> None:
         # Late columns backfilled.
         assert "error" in _cols(engine, "orders")
         assert "serial" in _cols(engine, "certificates")
+        # Baseline stamped, then upgraded to head (adds authorizations.error).
+        assert "error" in _cols(engine, "authorizations")
         with engine.connect() as conn:
-            # Stamped at baseline.
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            assert version == "0001_initial"
+            assert version == "0002_authz_error"
             # Existing data preserved.
             assert conn.execute(text("SELECT id FROM accounts")).scalar() == "a1"
     finally:

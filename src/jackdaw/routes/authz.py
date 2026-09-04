@@ -1,5 +1,6 @@
 """POST /acme/authz/{id} — return the current authorisation status (POST-as-GET)."""
 
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -46,10 +47,11 @@ async def get_authz(authz_id: str, request: Request, db: _DB) -> JSONResponse:
                 url=f"{base}/acme/challenge/{authz_id}",
                 status=authz.status,
                 token=authz.challenge_token or "",
+                error=json.loads(authz.error) if authz.error else None,
             )
         ],
     )
     return JSONResponse(
-        content=body.model_dump(),
+        content=body.model_dump(exclude_none=True),
         headers={"Link": f'<{base}/acme/order/{authz.order_id}>;rel="up"'},
     )
