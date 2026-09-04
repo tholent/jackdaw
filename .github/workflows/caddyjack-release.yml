@@ -1,0 +1,57 @@
+name: caddyjack Release
+
+# caddyjack versions independently of jackdaw: it releases on its own tag prefix
+# (caddyjack-vX.Y.Z) so a proxy release never rides on a jackdaw release and vice
+# versa. jackdaw's own release.yml triggers on the unprefixed vX.Y.Z tags.
+on:
+  push:
+    tags: ["caddyjack-v*.*.*"]
+
+jobs:
+  publish:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          v="${GITHUB_REF_NAME#caddyjack-v}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "minor=${v%.*}" >> "$GITHUB_OUTPUT"
+          echo "Releasing caddyjack $v"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/caddyjack
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.version }}
+            type=raw,value=${{ steps.ver.outputs.minor }}
+            type=sha
+            type=raw,value=latest
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./caddyjack
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

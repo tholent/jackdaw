@@ -1,0 +1,7 @@
+{
+	acme_ca {$LE_SERVER:https://acme-v02.api.letsencrypt.org/directory}
+}
+
+{$PROXY_HOST:localhost} {
+	reverse_proxy {$CONTAINER:localhost}:{$CONTAINER_PORT:80}
+}

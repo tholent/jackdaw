@@ -1,0 +1,42 @@
+name: caddyjack Build
+
+# Scoped to caddyjack changes so it doesn't run on every jackdaw push.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "caddyjack/**"
+      - ".github/workflows/caddyjack-ci.yml"
+  pull_request:
+    paths:
+      - "caddyjack/**"
+      - ".github/workflows/caddyjack-ci.yml"
+
+jobs:
+  build:
+    name: Build & validate config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t caddyjack:ci ./caddyjack
+
+      # Regression guard: prove the Caddyfile both parses AND substitutes its
+      # runtime env vars. This is exactly what the old build-time `echo` got
+      # wrong — the config was frozen at build and ignored `environment:`. If a
+      # future change reintroduces that, the greps below fail the build.
+      - name: Adapt Caddyfile with runtime env and assert substitution
+        run: |
+          out=$(docker run --rm \
+            -e LE_SERVER=https://jackdaw.example.com/directory \
+            -e PROXY_HOST=app.example.com \
+            -e CONTAINER=backend -e CONTAINER_PORT=8080 \
+            caddyjack:ci caddy adapt --config /etc/caddy/Caddyfile)
+          echo "$out"
+          echo "$out" | grep -q 'jackdaw.example.com/directory' \
+            || { echo "::error::LE_SERVER was not substituted"; exit 1; }
+          echo "$out" | grep -q 'app.example.com' \
+            || { echo "::error::PROXY_HOST was not substituted"; exit 1; }
+          echo "$out" | grep -q 'backend:8080' \
+            || { echo "::error::CONTAINER/CONTAINER_PORT were not substituted"; exit 1; }
