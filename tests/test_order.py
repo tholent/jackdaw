@@ -343,3 +343,62 @@ async def test_finalize_order_ready_dispatches_task(
     # reject a bare "...564681" with no "Z"/offset as invalid RFC 3339.
     expires = datetime.fromisoformat(body_json["expires"])
     assert expires.tzinfo is not None
+
+
+async def test_double_finalize_dispatches_only_once(
+    test_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """A second finalize for an order already claimed (now 'processing') is
+    rejected, so a retried finalize never launches a duplicate upstream
+    issuance against the shared CA client."""
+    from unittest.mock import MagicMock
+
+    from jackdaw.main import app
+
+    key, account_url = await _create_account(test_client, db_session)
+    order_url, order_data = await _create_order(
+        test_client, db_session, key, account_url, "test.example.com"
+    )
+
+    order_id = order_url.rsplit("/", 1)[-1]
+    result = await db_session.execute(select(Order).where(Order.id == order_id))
+    order = result.scalar_one()
+    order.status = "ready"
+    result2 = await db_session.execute(
+        select(Authorization).where(Authorization.order_id == order_id)
+    )
+    for authz in result2.scalars().all():
+        authz.status = "valid"
+    await db_session.commit()
+
+    csr_b64 = _b64url(_make_csr("test.example.com"))
+    finalize_url = order_data["finalize"]
+    path = finalize_url.replace("https://jackdaw.test", "")
+
+    async def _finalize() -> Any:
+        nonce = await generate_nonce(db_session)
+        body = build_jws(
+            payload={"csr": csr_b64},
+            url=finalize_url,
+            nonce=nonce,
+            key=key,
+            kid=account_url,
+        )
+        return await test_client.post(path, json=body, headers=_CT)
+
+    app.state.le_client = MagicMock()
+    mock_pf = AsyncMock(return_value=None)
+    try:
+        with patch("jackdaw.worker.process_finalize", new=mock_pf):
+            resp1 = await _finalize()
+            resp2 = await _finalize()
+    finally:
+        del app.state.le_client
+
+    assert resp1.status_code == 200
+    assert resp1.json()["status"] == "processing"
+    # The retry lost the ready→processing claim and is rejected as not-ready.
+    assert resp2.status_code == 403
+    assert "orderNotReady" in resp2.text
+    # Exactly one upstream issuance was dispatched.
+    assert mock_pf.call_count == 1

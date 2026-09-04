@@ -5,11 +5,11 @@ import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jackdaw import acme_errors
@@ -284,14 +284,38 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
     if not identifiers:
         raise HTTPException(status_code=400, detail="Order has no identifiers")
     domain: str = identifiers[0]["value"]
+    expires_at = order.expires_at
 
-    # Transition to processing now, before the background task runs, so the
-    # response reflects it immediately (RFC 8555 §7.4: a finalize response
-    # must never report "ready" — that's a precondition, not a valid reply)
-    # and a retried finalize POST for this order hits the guard above instead
-    # of launching a second concurrent real Let's Encrypt issuance.
-    order.status = "processing"
+    # Atomically transition ready → processing.  The plain-status guard above
+    # is only a fast path: it does a read-check-write across await points, so
+    # two concurrent finalize POSTs for this order (Caddy retries the finalize
+    # request whenever the first response is slow — and we make the client wait
+    # while flipping state) could both observe "ready" and each dispatch a real
+    # upstream issuance against the shared CA client.  A conditional UPDATE lets
+    # exactly one request win the ready→processing claim; the loser is rejected.
+    #
+    # Claiming before the background task runs also makes the response reflect
+    # "processing" immediately (RFC 8555 §7.4: a finalize response must never
+    # report "ready" — that's a precondition, not a valid reply).
+    claimed = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(Order)
+            .where(Order.id == order_id, Order.status == "ready")
+            .values(status="processing")
+            .execution_options(synchronize_session=False)
+        ),
+    )
     await db.commit()
+    if claimed.rowcount == 0:
+        current = await db.scalar(select(Order.status).where(Order.id == order_id))
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "type": acme_errors.ORDER_NOT_READY,
+                "detail": f"Order status is {current!r}, expected 'ready'",
+            },
+        )
 
     # Kick off the background worker.  We import here to avoid circular imports
     # at module load time.
@@ -313,10 +337,10 @@ async def finalize_order(order_id: str, request: Request, db: _DB) -> JSONRespon
     result = await db.execute(select(Authorization).where(Authorization.order_id == order_id))
     authzs = result.scalars().all()
     body = OrderResponse(
-        status=order.status,
+        status="processing",
         identifiers=[Identifier(**i) for i in identifiers],
         authorizations=[f"{base}/acme/authz/{a.id}" for a in authzs],
         finalize=f"{base}/acme/order/{order_id}/finalize",
-        expires=_isoformat_utc(order.expires_at),
+        expires=_isoformat_utc(expires_at),
     )
     return JSONResponse(content=body.model_dump(exclude_none=True))
