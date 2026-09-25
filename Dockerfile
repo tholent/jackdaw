@@ -16,8 +16,14 @@ COPY src/ src/
 
 # Now install the project itself into the venv.  This must run after the source
 # is present: the CMD invokes the venv interpreter directly (no `uv run`), so
-# the project has to be importable without a runtime re-sync.
-RUN uv sync --frozen --no-dev
+# the project has to be importable without a runtime re-sync.  --no-editable
+# builds the wheel and installs the package into site-packages, rather than a
+# .pth pointer back at /app/src, so the image runs exactly what the wheel ships.
+RUN uv sync --frozen --no-dev --no-editable
+
+# Fail the build if the installed package is missing or empty (0.4.0 shipped a
+# dist-info with no jackdaw/ inside it).
+RUN /app/.venv/bin/python -c "import importlib.util as u, jackdaw; assert u.find_spec('jackdaw.serve')"
 
 # Create the unprivileged runtime user and own the app + a freshly seeded /data.
 # The UID/GID are pinned to deterministic defaults so the entrypoint can detect

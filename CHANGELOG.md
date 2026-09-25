@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-24
+
+### Changed
+- Docker image installs the project non-editable (built wheel into
+  site-packages) instead of a `.pth` pointer to `/app/src`.
+
+### Added
+- Image build fails if `jackdaw` isn't importable, and CI smoke-tests the import
+  through the entrypoint as a remapped `PUID`/`PGID` user.
+
 ## [0.5.0] - 2026-09-24
 
 ### Added
