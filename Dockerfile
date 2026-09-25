@@ -20,11 +20,16 @@ COPY src/ src/
 RUN uv sync --frozen --no-dev
 
 # Create the unprivileged runtime user and own the app + a freshly seeded /data.
+# The UID/GID are pinned to deterministic defaults so the entrypoint can detect
+# whether PUID/PGID at runtime differ and remap accordingly.
 # setpriv (from util-linux) is used by the entrypoint to drop privileges while
 # preserving CAP_NET_BIND_SERVICE (granted via `cap_add` in compose) so the
 # non-root app can still bind :443.
-RUN groupadd --system jackdaw \
-    && useradd --system --gid jackdaw --home-dir /app --no-create-home jackdaw \
+ARG JACKDAW_UID=1000
+ARG JACKDAW_GID=1000
+RUN groupadd --system --gid ${JACKDAW_GID} jackdaw \
+    && useradd --system --uid ${JACKDAW_UID} --gid jackdaw \
+        --home-dir /app --no-create-home jackdaw \
     && mkdir -p /data \
     && chown -R jackdaw:jackdaw /data /app \
     && apt-get update \

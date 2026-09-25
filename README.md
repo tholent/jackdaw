@@ -408,7 +408,9 @@ committing (SQLite alters run in batch mode).
   created by an older root-running image is therefore adopted automatically on
   the next start, with no manual migration step. (Grant the capability in your
   own compose file with `cap_add: [NET_BIND_SERVICE]`; in plain-HTTP mode on a
-  high port it is neither present nor needed.)
+  high port it is neither present nor needed.) Set `PUID`/`PGID` (defaulting to
+  `1000`/`1000`) to remap the `jackdaw` user to match a host UID/GID — useful
+  when mounting a host directory at `/data` instead of a named volume.
 
 - **No client authentication.** Any client that can reach port 443 can request
   a certificate. Restrict access with firewall rules or a VPN — do not expose

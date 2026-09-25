@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-24
+
+### Added
+- `PUID`/`PGID` env vars remap the container's `jackdaw` user at startup, so
+  bind-mounting a host directory at `/data` no longer requires matching
+  ownership on the host. Defaults are `1000`/`1000`.
+
+### Fixed
+- `finalize` now atomically claims the `ready → processing` transition, so
+  concurrent finalize requests can no longer both drive issuance.
+- LE client recovers the existing cert on an already-finalized order instead
+  of erroring, and per-domain issuance locking prevents duplicate concurrent
+  orders for the same identifier.
+- HTTP-01 validation failures now surface on the authorization as ACME-standard
+  problem documents, so clients see the real reason instead of a generic status.
+- CI: greenlet coverage tracing is enabled and the Python matrix is pinned.
+
+### Changed
+- Refactor: ACME error-type URNs extracted into a constants module.
+
 ## [0.4.0] - 2026-07-06
 
 ### Security
