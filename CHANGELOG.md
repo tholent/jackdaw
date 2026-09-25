@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- caddyjack `HEALTHCHECK` probes the admin API at `127.0.0.1:2019` instead of
+  `localhost:2019`. busybox `wget` resolved `localhost` to `::1`, where Caddy
+  isn't listening, so healthy containers were always reported unhealthy.
+
 ## [0.5.1] - 2026-09-24
 
 ### Changed

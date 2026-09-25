@@ -40,3 +40,20 @@ jobs:
             || { echo "::error::PROXY_HOST was not substituted"; exit 1; }
           echo "$out" | grep -q 'backend:8080' \
             || { echo "::error::CONTAINER/CONTAINER_PORT were not substituted"; exit 1; }
+
+      # Regression guard: the baked HEALTHCHECK must actually pass against a
+      # running container (it once probed `localhost`, which busybox wget
+      # resolved to ::1 where Caddy's admin API isn't listening).
+      - name: Assert container reports healthy
+        run: |
+          docker run -d --name caddyjack-health caddyjack:ci
+          for _ in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' caddyjack-health)
+            [ "$status" = healthy ] && exit 0
+            [ "$status" = unhealthy ] && break
+            sleep 3
+          done
+          docker inspect -f '{{json .State.Health}}' caddyjack-health
+          docker logs caddyjack-health
+          echo "::error::container did not become healthy (last status: $status)"
+          exit 1

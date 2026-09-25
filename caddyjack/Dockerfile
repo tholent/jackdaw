@@ -33,5 +33,9 @@ EXPOSE 80 443
 # so this reports healthy even while first-boot cert issuance is still keeping
 # the public :443 listener offline. Override in compose if you want a
 # readiness-style check against the proxied site instead.
+#
+# Probe 127.0.0.1, not `localhost`: musl resolves localhost to ::1 first and
+# busybox wget doesn't fall back to IPv4, but Caddy's admin listener binds
+# localhost:2019 on 127.0.0.1 only — so `localhost` here is always refused.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://localhost:2019/config/ >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://127.0.0.1:2019/config/ >/dev/null 2>&1 || exit 1

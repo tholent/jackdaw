@@ -84,7 +84,7 @@ account key. Without it, every restart re-requests a certificate.
 ## Health check
 
 The image bakes a liveness `HEALTHCHECK` against Caddy's admin API
-(`localhost:2019`), which answers from process start — so the container reports
+(`127.0.0.1:2019`), which answers from process start — so the container reports
 healthy even while first-boot issuance keeps the public :443 listener offline.
 Override it in compose if you want a readiness check against the site itself.
 
